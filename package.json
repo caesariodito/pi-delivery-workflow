@@ -33,7 +33,7 @@
     "check": "npm run test && tsc -p tsconfig.json"
   },
   "dependencies": {
-    "pi-subagents": "0.76.1"
+    "pi-subagents": "github:caesariodito/pi-subagents#336d8e7c9c2d60dd0de5cbac88f555870578186a"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"

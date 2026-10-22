@@ -40,13 +40,15 @@ Extension owns no daemon, scheduler, database, subprocess manager, or alternate 
 `delivery.ticket`:
 
 1. records ticket `active` in mission state;
-2. launches worker, optionally in managed worktree;
-3. runs allowlisted host validation gate;
-4. records `review`;
-5. launches fresh structured reviewer;
-6. records `done`, `blocked`, or `needs_fix`;
-7. resumes retained writer for accepted findings;
-8. stops after configured fix-round ceiling.
+2. materializes bounded ignored `.scratch/` context and ticket files into immutable child task content;
+3. launches worker, optionally in managed worktree;
+4. copies declared ignored outputs into runtime-owned artifact storage before worktree cleanup;
+5. runs allowlisted host validation gate;
+6. records `review`;
+7. launches fresh structured reviewer with same immutable contract;
+8. records `done`, `blocked`, or `needs_fix`;
+9. resumes retained writer for accepted findings;
+10. stops after configured fix-round ceiling.
 
 ### Skill
 
@@ -92,7 +94,7 @@ Native fork context remains optional. Current public pi-subagents API forks curr
 
 Named workflow resources provide trusted provenance and bounded input validation. Public arguments cannot inject workflow code or arbitrary host commands. Validation command accepts only fixed test-runner shapes and rejects shell operators.
 
-Current command allowlist is intentionally narrow. Add argv-style structured fields if projects need richer flags; never concatenate arbitrary shell text.
+Current command allowlist is intentionally narrow. Structured `{ runner: "npm", script: "..." }` binds package scripts without concatenating arbitrary shell text. Richer flags remain unsupported.
 
 ## Limits
 

@@ -63,7 +63,8 @@ Forbidden files:
       "batch": 1,
       "ownedFiles": ["src/keys.ts", "test/keys.test.ts"],
       "forbiddenFiles": ["package.json"],
-      "validationCommand": "npm test",
+      "validation": { "runner": "npm", "script": "validate:t001" },
+      "artifactOutputs": [".scratch/key-rotation/evidence/T001.json"],
       "isolated": true,
       "maxFixRounds": 2,
       "status": "ready"
@@ -95,5 +96,13 @@ Keep tightly coupled seam in one ticket. Split multi-seam work by independently 
 | `needs_fix` | Bounded actionable findings accepted | Resume retained writer |
 | `done` | Validation and fresh review clean | Parent integration/acceptance |
 | `blocked` | Decision, infrastructure, provider, scope, or fix-limit issue | Parent/user action |
+
+Validation accepts one allowlisted `validationCommand` or structured npm script binding:
+
+```json
+"validation": { "runner": "npm", "script": "validate:t001" }
+```
+
+Compound checks belong in package scripts; shell operators and direct script paths remain rejected. Ignored outputs needing parent access must be declared in `artifactOutputs`. Paths must be bounded relative `.scratch/` paths; runtime copies regular non-symlink files into durable run storage before managed worktree cleanup.
 
 Never infer `done` from child prose alone.

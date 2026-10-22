@@ -117,7 +117,9 @@ Those stop and return to parent/user.
 
 ## Context and prompt caching
 
-Workers receive immutable `.scratch/<task>/context.md` before ticket details. Stable bundle gives explicit, inspectable shared prefix and may improve provider KV-cache reuse.
+Workers receive immutable validated contents of `.scratch/<task>/context.md` before ticket details, including in managed worktrees where ignored source files do not exist. Stable bundle gives explicit, inspectable shared prefix and may improve provider KV-cache reuse.
+
+Tickets may declare bounded ignored `artifactOutputs`; runtime copies regular files into durable run storage before worktree cleanup and records requested-to-saved mappings.
 
 Native `context: "fork"` remains available when transcript inheritance is essential, but pi-subagents forks current persisted parent leaf. It cannot pin arbitrary earlier message-tree node ID. Package avoids custom session surgery until measured cache evidence justifies that seam.
 

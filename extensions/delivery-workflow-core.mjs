@@ -1,6 +1,11 @@
 export const REVIEWER_MODEL = "9router/cc/claude-opus-5-5";
 export const WORKER_MODEL = "9router/cx/gpt-5.6-sol";
 
+import fs from "node:fs";
+import path from "node:path";
+
+const MAX_CONTRACT_BYTES = 128 * 1024;
+
 const REVIEW_SCHEMA = {
   type: "object",
   properties: {
@@ -54,6 +59,46 @@ function safeValidationCommand(command) {
   ].some((pattern) => pattern.test(command));
 }
 
+function validationCommand(args) {
+  if (args.validation !== undefined) {
+    if (!args.validation || typeof args.validation !== "object" || Array.isArray(args.validation) || Object.keys(args.validation).some((key) => !["runner", "script"].includes(key))) return { error: "validation must contain only runner and script." };
+    if (args.validation.runner !== "npm" || typeof args.validation.script !== "string" || !/^[A-Za-z0-9_.:-]+$/.test(args.validation.script)) return { error: "validation must be { runner: \"npm\", script: <safe package script> }." };
+    return { command: `npm run ${args.validation.script}` };
+  }
+  if (!safeValidationCommand(args.validationCommand)) return { error: "validationCommand must be one allowlisted test command without shell operators; use npm test, npm run <safe-script>, or structured validation." };
+  return { command: args.validationCommand };
+}
+
+function contractFile(cwd, value, key) {
+  if (typeof value !== "string" || !value.trim() || value.length > 4096) return { error: `${key} must contain 1–4096 characters.` };
+  const root = fs.realpathSync(cwd);
+  const scratch = path.join(root, ".scratch");
+  const requested = path.resolve(root, value);
+  const relative = path.relative(scratch, requested);
+  if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return { error: `${key} must be a contained file under repository .scratch/.` };
+  let stat;
+  let real;
+  try {
+    stat = fs.lstatSync(requested);
+    real = fs.realpathSync(requested);
+  } catch {
+    return { error: `${key} must exist.` };
+  }
+  const realRelative = path.relative(scratch, real);
+  if (!stat.isFile() || stat.isSymbolicLink() || realRelative === ".." || realRelative.startsWith(`..${path.sep}`) || path.isAbsolute(realRelative)) return { error: `${key} must be a regular, non-linked file contained under repository .scratch/.` };
+  if (stat.size > MAX_CONTRACT_BYTES) return { error: `${key} exceeds ${MAX_CONTRACT_BYTES} bytes.` };
+  const content = fs.readFileSync(real);
+  if (content.includes(0)) return { error: `${key} must be UTF-8 text, not binary.` };
+  const decoded = new TextDecoder("utf-8", { fatal: true }).decode(content);
+  return { content: decoded };
+}
+
+function artifactOutputs(value) {
+  if (value === undefined) return { paths: [] };
+  if (!Array.isArray(value) || value.length > 16 || value.some((item) => typeof item !== "string" || !item || item.length > 1024 || !item.startsWith(".scratch/") || /^[/\\]|(?:^|[/\\])\.\.(?:[/\\]|$)/.test(item) || /[\u0000-\u001f\u007f]/.test(item))) return { error: "artifactOutputs must contain at most 16 bounded relative .scratch/ paths without traversal or control characters." };
+  return { paths: value };
+}
+
 export function resolveReview(args) {
   const keysError = exactKeys(args, ["kind", "artifact", "contextBundle", "focus"]);
   if (keysError) return { error: keysError };
@@ -90,23 +135,30 @@ export function resolveReview(args) {
   };
 }
 
-export function resolveTicket(args) {
+export function resolveTicket(args, context = { cwd: process.cwd() }) {
   const allowed = [
-    "ticketId", "ticketPath", "contextBundle", "validationCommand",
+    "ticketId", "ticketPath", "contextBundle", "validationCommand", "validation", "artifactOutputs",
     "ownedFiles", "forbiddenFiles", "isolated", "maxFixRounds",
   ];
   const keysError = exactKeys(args, allowed);
   if (keysError) return { error: keysError };
-  for (const [key, max] of [["ticketId", 128], ["ticketPath", 4096], ["contextBundle", 4096], ["validationCommand", 2000]]) {
-    const error = text(args, key, max, true);
+  const ticketIdError = text(args, "ticketId", 128, true);
+  if (ticketIdError) return { error: ticketIdError };
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(args.ticketId)) return { error: "ticketId must be a safe workflow key." };
+  if ((args.validationCommand === undefined) === (args.validation === undefined)) return { error: "Specify exactly one of validationCommand or validation." };
+  if (args.validationCommand !== undefined) {
+    const error = text(args, "validationCommand", 2000, true);
     if (error) return { error };
   }
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(args.ticketId)) {
-    return { error: "ticketId must be a safe workflow key." };
-  }
-  if (!safeValidationCommand(args.validationCommand)) {
-    return { error: "validationCommand must be one allowlisted test command without shell operators." };
-  }
+  const validated = validationCommand(args);
+  if (validated.error) return validated;
+  const contextFile = contractFile(context.cwd, args.contextBundle, "contextBundle");
+  if (contextFile.error) return contextFile;
+  const ticketFile = contractFile(context.cwd, args.ticketPath, "ticketPath");
+  if (ticketFile.error) return ticketFile;
+  if (Buffer.byteLength(contextFile.content) + Buffer.byteLength(ticketFile.content) > MAX_CONTRACT_BYTES) return { error: `Contract inputs exceed ${MAX_CONTRACT_BYTES} aggregate bytes.` };
+  const outputs = artifactOutputs(args.artifactOutputs);
+  if (outputs.error) return outputs;
   for (const key of ["ownedFiles", "forbiddenFiles"]) {
     if (!Array.isArray(args[key]) || args[key].length > 64 || args[key].some((item) => typeof item !== "string" || !item.trim() || item.length > 1024)) {
       return { error: `${key} must be an array of at most 64 non-empty paths.` };
@@ -119,10 +171,11 @@ export function resolveTicket(args) {
 
   const packet = [
     `Ticket: ${args.ticketId}`,
-    `Read ${args.contextBundle}, then ${args.ticketPath}.`,
+    `Immutable context bundle (${args.contextBundle}):\n${contextFile.content}`,
+    `Immutable ticket (${args.ticketPath}):\n${ticketFile.content}`,
     `Owned files/contracts: ${args.ownedFiles.join(", ") || "none declared"}`,
     `Forbidden files: ${args.forbiddenFiles.join(", ") || "none declared"}`,
-    `Validation command: ${args.validationCommand}`,
+    `Validation command: ${validated.command}`,
     "Implement only approved ticket scope. You are sole writer for this checkout/worktree.",
     "Run focused validation. Ask supervisor instead of making unapproved product, architecture, dependency, migration, security, or public-API decisions.",
     "Report changed files, validation evidence, residual risks, and any blocked decision.",
@@ -130,7 +183,7 @@ export function resolveTicket(args) {
 
   const reviewTask = [
     `Review implementation for ticket ${args.ticketId}.`,
-    `Read ${args.contextBundle} and ${args.ticketPath}.`,
+    `Use this same immutable contract content:\n${contextFile.content}\n\n${ticketFile.content}`,
     "Inspect candidate handoff artifacts, captured patch, and validation evidence supplied below. Authority: read-only; do not edit.",
     "Return actionable findings only. Use needs_fix for bounded implementation defects and blocked for decisions outside approved scope.",
   ].join("\n");
@@ -142,7 +195,8 @@ export function resolveTicket(args) {
     context: "fresh",
     model: WORKER_MODEL,
     worktree: args.isolated,
-    gate: args.validationCommand,
+    gate: validated.command,
+    artifactOutputs: outputs.paths,
   };
   const reviewer = {
     label: `Review ${args.ticketId}`,
@@ -166,7 +220,7 @@ for (let round = 0; round <= ${args.maxFixRounds}; round += 1) {
   await state.set(ticketKey, { status: "review", attempt: round + 1, writerRunId: candidate.runId ?? null, nextAction: "review" });
   review = await runs.run("review-" + (round + 1), {
     ...${JSON.stringify(reviewer)},
-    task: ${JSON.stringify(reviewTask)} + "\\nCandidate evidence: " + JSON.stringify({ output: candidate.output, outputReference: candidate.outputReference, artifactPaths: candidate.artifactPaths })
+    task: ${JSON.stringify(reviewTask)} + "\\nCandidate evidence: " + JSON.stringify({ output: candidate.output, outputReference: candidate.outputReference, outputPathMapping: candidate.outputPathMapping, artifactPaths: candidate.artifactPaths })
   });
   if (!review.ok || review.structuredOutput?.verdict === "blocked") {
     await state.set(ticketKey, { status: "blocked", attempt: round + 1, writerRunId: candidate.runId ?? null, reviewRunId: review.runId ?? null, nextAction: "parent decision" });
@@ -174,7 +228,7 @@ for (let round = 0; round <= ${args.maxFixRounds}; round += 1) {
   }
   if (review.structuredOutput?.verdict === "ok") {
     await state.set(ticketKey, { status: "done", attempt: round + 1, writerRunId: candidate.runId ?? null, reviewRunId: review.runId ?? null, nextAction: "parent acceptance" });
-    return { ticketId: ${JSON.stringify(args.ticketId)}, status: "done", candidate, review };
+    return { ticketId: ${JSON.stringify(args.ticketId)}, status: "done", candidate, review, outputReference: candidate.outputReference, outputPathMapping: candidate.outputPathMapping, artifactPaths: candidate.artifactPaths };
   }
   if (round === ${args.maxFixRounds}) break;
   await state.set(ticketKey, { status: "needs_fix", attempt: round + 1, writerRunId: candidate.runId ?? null, reviewRunId: review.runId ?? null, nextAction: "apply accepted findings" });

@@ -21,7 +21,13 @@ Scratch artifacts must not contain:
 
 Reason: trusted named workflow can grant host command authority. Freeform shell input would turn workflow arguments into command injection.
 
-To support new validator, add explicit anchored pattern and smoke tests. Prefer structured argv API if pi-subagents exposes one later.
+Compound validation belongs in a package script and uses structured `{ runner: "npm", script: "..." }`. Direct script paths remain rejected.
+
+## Contract and output paths
+
+Context and ticket inputs must resolve to regular UTF-8 files under repository `.scratch/`. Missing, binary, oversized, traversal, absolute, and symlink-escape inputs fail before child launch. Aggregate contract content is capped at 128 KiB.
+
+`artifactOutputs` accepts at most 16 bounded relative `.scratch/` paths. Runtime rejects traversal, symlinks, non-files, missing files, and files over 50 MiB, then copies declared outputs to run-owned storage before managed worktree cleanup. Handoff manifest records requested-to-saved mappings.
 
 ## Unattended mutation boundary
 

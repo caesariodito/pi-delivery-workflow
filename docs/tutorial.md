@@ -113,7 +113,8 @@ Parent creates mission and launches `delivery.ticket` per dependency-ready ticke
     "ticketId": "T001",
     "ticketPath": ".scratch/key-rotation/tickets/T001.md",
     "contextBundle": ".scratch/key-rotation/context.md",
-    "validationCommand": "npm test",
+    "validation": { "runner": "npm", "script": "validate:t001" },
+    "artifactOutputs": [".scratch/key-rotation/evidence/T001.json"],
     "ownedFiles": ["src/keys.ts", "test/keys.test.ts"],
     "forbiddenFiles": ["package.json"],
     "isolated": true,
@@ -125,7 +126,9 @@ Parent creates mission and launches `delivery.ticket` per dependency-ready ticke
 }
 ```
 
-Supported validation forms include common `npm`, `pnpm`, `yarn`, `bun`, Node test runner, pytest, Cargo, Go, and .NET test commands. Shell operators are rejected.
+Supported `validationCommand` forms include common `npm`, `pnpm`, `yarn`, `bun`, Node test runner, pytest, Cargo, Go, and .NET test commands. Structured validation safely binds an npm package script. Shell operators, direct script paths, and newline injection are rejected.
+
+Resource reads ignored context/ticket files from source checkout, validates containment and text bounds, then embeds immutable content for writer and reviewer. Declared `artifactOutputs` are copied from isolated worktree into durable run storage and returned through artifact paths and handoff mappings.
 
 ## 9. Supervise
 
