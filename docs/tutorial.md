@@ -1,167 +1,104 @@
 # Workflow tutorial
 
-## 1. Start from repository
+## 1. Prepare repository and Herdr
 
-Ensure clean Git state when implementation will use managed worktrees. Ensure scratch path is ignored:
+Require clean Git checkout and ignored scratch path:
 
 ```bash
-printf '\n.scratch/\n' >> .gitignore
+herdr --version
+herdr status --json
+grep -qxF '.scratch/' .gitignore || printf '\n.scratch/\n' >> .gitignore
 ```
 
-Use smallest direct flow for trivial work. For non-trivial objective:
+Supported runtime is Herdr `0.9.5`, protocol `22`. Package does not install/start server.
+
+## 2. Start discovery
 
 ```text
 /delivery Add project-level API key rotation
 ```
 
-## 2. Brainstorm requirements
+Parent keeps trivial work direct. For workflow candidate, capture requirements, compatibility, trust boundaries, non-goals, and measurable acceptance criteria.
 
-Parent asks only unresolved product and contract questions. Good answers establish:
+If finalized `implementation-review` artifacts exist under same `.scratch/<task>/`, validate source JSON, require rebuilt review pages, and ensure no unresolved implementation-blocking questions. Treat JSON as source; HTML/exported answers are transport. Compose `spec.md` from `implementation-plan.json` problem/goals/scope/non-goals/acceptance, enriched by `technical-spec.json` behavior/contracts/data/architecture/security/failure handling/verification. Preserve stable IDs and ask only missing/conflicting decisions.
 
-- user-visible behavior;
-- compatibility constraints;
-- security and data-integrity boundaries;
-- non-goals;
-- measurable acceptance criteria.
+## 3. Review spec and plan
 
-Parent writes `.scratch/<task>/spec.md`.
+Create:
 
-## 3. Review specification
+```text
+.scratch/<task>/spec.md
+.scratch/<task>/plan.md
+.scratch/<task>/context.md
+```
 
-Parent launches `delivery.review` with:
+Call `delivery_review` for spec then plan:
 
 ```json
 {
+  "runId": "key-rotation-spec",
   "kind": "spec",
-  "artifact": ".scratch/<task>/spec.md",
-  "contextBundle": ".scratch/<task>/context.md"
+  "artifact": ".scratch/key-rotation/spec.md",
+  "contextBundle": ".scratch/key-rotation/context.md"
 }
 ```
 
-Reviewer starts fresh on Claude Opus 5.5 and cannot edit. Parent accepts, rejects, or escalates each finding. Product decisions return to user.
+Reviewer is fresh, read-only, fixed model, and writes nonce-bound result through scoped tool. Parent classifies findings as valid, stale, invalid, speculative, or blocked, revises accepted items, and returns product/architecture decisions to user.
 
-## 4. Build and review plan
+Plan should use `implementation-plan.json` delivery choices when present: business context, seams, contracts/files, ordering, ownership, dependencies, validation, rollout, done, tickets. `technical-spec.json` owns technical contracts; `implementation-plan.json` owns delivery decisions.
 
-Parent writes `.scratch/<task>/plan.md` with seams, ordering, files/contracts, failure handling, tests, rollout, and ticket split. Same reviewer checks feasibility and validation completeness with `kind: "plan"`.
+## 4. Freeze context and tickets
 
-Parent revises valid findings.
+After artifacts stabilize, freeze context with objective, artifact digests, repository/base, decisions, constraints, validation, and escalation. Create bounded tickets with exact owned/forbidden paths, dependencies/batches, validation, acceptance, Herdr worktree/pane identities, and max two fix rounds. Independent writers require separate worktrees and non-overlapping ownership.
 
-## 5. Freeze context bundle
+## 5. Approve
 
-Parent writes `.scratch/<task>/context.md`:
+Present reviewed paths, tickets/batches, ownership, exact executable/argv gates, worker/reviewer models, Herdr identities, fix ceiling, expected cost/latency, and blocking conditions. Obtain one explicit plan-wide implementation approval. Approval excludes scope/model/dependency/API/migration/publication/integration-mode changes.
 
-```markdown
-# Objective
-...
+## 6. Start approved run
 
-# Approved decisions
-...
+Call `delivery_start` with approved base SHA, serialized ticket array, and validation argv. See [ticket contract](ticket-contract.md). Runner validates all contracts before claiming run directory, then detaches.
 
-# Contracts
-- Spec: spec.md (sha256: ...)
-- Plan: plan.md (sha256: ...)
-
-# Global constraints
-...
-
-# Validation conventions
-...
-
-# Escalation rules
-...
-```
-
-Do not put raw transcript or secrets here.
-
-## 6. Create tickets
-
-Parent writes `tickets.json` and one Markdown file per ticket. See [ticket contract](ticket-contract.md).
-
-Example batches:
+Herdr creates approved worktree, starts Pi worker with model argv, waits for exclusive worker result, runs gate, freezes candidate, and starts fresh reviewer with:
 
 ```text
-Batch 1: T001 schema contract, T002 UI copy (independent)
-Batch 2: T003 integration (depends on T001, T002)
-Batch 3: T004 end-to-end verification (depends on T003)
+--model <reviewer-model>
+--extension <packed reviewer-result-tool.ts>
+--delivery-result-path <absolute result path>
+--delivery-result-nonce <nonce>
+--tools read,grep,find,ls,delivery_result_write
 ```
 
-Parallel writers need separate managed worktrees and exclusive ownership.
+These are discrete argv, not shell string.
 
-## 7. Approve execution
-
-Parent presents:
-
-- reviewed artifact paths;
-- ticket count and dependency batches;
-- models and medium thinking;
-- write ownership and isolation;
-- exact validation gates;
-- two-round fix ceiling;
-- expected token/latency cost;
-- conditions that block unattended work.
-
-User approves once for listed plan. Scope changes need renewed approval.
-
-## 8. Run tickets
-
-Parent creates mission and launches `delivery.ticket` per dependency-ready ticket:
-
-```json
-{
-  "workflow": "delivery.ticket",
-  "args": {
-    "ticketId": "T001",
-    "ticketPath": ".scratch/key-rotation/tickets/T001.md",
-    "contextBundle": ".scratch/key-rotation/context.md",
-    "validation": { "runner": "npm", "script": "validate:t001" },
-    "artifactOutputs": [".scratch/key-rotation/evidence/T001.json"],
-    "ownedFiles": ["src/keys.ts", "test/keys.test.ts"],
-    "forbiddenFiles": ["package.json"],
-    "isolated": true,
-    "maxFixRounds": 2
-  },
-  "async": true,
-  "cwd": "/path/to/repository",
-  "missionId": "<mission-id>"
-}
-```
-
-Supported `validationCommand` forms include common `npm`, `pnpm`, `yarn`, `bun`, Node test runner, pytest, Cargo, Go, and .NET test commands. Structured validation safely binds an npm package script. Shell operators, direct script paths, and newline injection are rejected.
-
-Resource reads ignored context/ticket files from source checkout, validates containment and text bounds, then embeds immutable content for writer and reviewer. Declared `artifactOutputs` are copied from isolated worktree into durable run storage and returned through artifact paths and handoff mappings.
-
-## 9. Supervise
-
-Inspect:
+## 7. Supervise
 
 ```text
-/subagents-fleet
+/delivery_status {"runId":"key-rotation"}
+/delivery_steer {"runId":"key-rotation","ticketId":"T001","message":"Use approved contract section SEC-2."}
+/delivery_stop {"runId":"key-rotation","ticketId":"T001"}
 ```
 
-Guide live run:
+Use steer for bounded guidance. `delivery_reply` is reserved but currently rejects normal blocked decisions because runtime does not persist `ticket.question`; do not use it as workflow instruction. Stop targets recorded worker only; `stopped` does not prove reviewer inactivity, and `stop_unconfirmed` means retain everything and inspect.
+
+## 8. Integrate and continue
+
+At `awaiting_integration`, parent inspects result files, validation, review, patch, path hashes, and handoff. If any changed path is deleted, do not integrate or continue: current verifier expects content for every path and rejects deletions. Preserve evidence and escalate; deletion support is pending. Otherwise integrate reviewed `done` lanes, commit clean parent checkout, then:
 
 ```text
-/subagents-steer <run-id> Focus on failing token replay test
+/delivery_continue {"runId":"key-rotation","integratedSha":"<40-or-64-hex-sha>"}
 ```
 
-Stop top-level async run:
+Runtime verifies clean checkout, ancestry, exact integrated path hashes, and validation before dependent batch. Repeat until final state, then parent performs final acceptance. Merge, push, deploy, release, and publication remain separately authorized.
 
-```text
-/subagents-stop <run-id>
-```
+## 9. Recover and clean up
 
-Children ask parent when ticket requires unapproved decision. User can step away; normal async completion wakes originating session.
+After interruption, establish detached runner still exists. No automatic restart/reconciliation is wired. Missing/dead runner can leave active state and unconsumed inbox; treat it as blocked, send no controls, do not integrate, preserve every artifact/worktree/agent identity, and escalate without fallback or replacement. Exact-settled recovery is only an internal unit-tested seam, not an operator feature.
 
-## 10. Integrate and accept
+After acceptance or abandonment, manually verify recorded worker and every reviewer target and pane inactive, inspect ownership evidence, and require clean worktree state before removing worktrees and later runtime evidence. Preserve and reconcile dirty changes. No automatic cleanup.
 
-Managed worktree output is handoff evidence, not automatic merge. Parent:
+Legacy pi-subagents runs cannot continue. Settle them with old install, preserve evidence, remove old dependency, install current package, verify Herdr, reload, and start new run.
 
-1. inspects ticket state and reviewer result;
-2. inspects handoff patch;
-3. integrates only `done` ticket;
-4. reruns integrated validation;
-5. starts dependent batch;
-6. reports final evidence and residual risks;
-7. closes mission after final acceptance.
+## 10. Manual live fixture
 
-Push, merge, deploy, and release remain separate user-authorized actions.
+Automated tests are synthetic. Before release, follow `CONTRIBUTING.md` disposable live fixture and retain redacted evidence for status handshake, worker result, scoped reviewer result, integration continuation, stop, and cleanup. Do not publish without separate authority.

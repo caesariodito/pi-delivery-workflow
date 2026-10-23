@@ -2,100 +2,57 @@
 
 ## Trust boundaries
 
-Package extension runs inside Pi process with user OS permissions. Install only trusted revision. Project code and web content remain untrusted data.
+Extension and detached runner execute with user OS permissions. Install trusted revisions only. Project files and model output remain untrusted data. Never put credentials, `.env` values, provider tokens, `auth.json`, MCP secrets, raw session transcripts, or unrelated private data in tickets, context, prompts, or fixtures.
 
-Workflow resource arguments persist as evidence. Never put secrets in them.
+## Command and setup policy
 
-Scratch artifacts must not contain:
+Validation is structured `{ executable, args, cwd? }`. Runtime uses `spawn`/`execFile` with `shell: false`. Herdr setup and Pi setup are separate argv entries; worker gets model flag, reviewer gets model, extension path, configured result path, nonce, and tools. No input becomes shell syntax.
 
-- `.env` values;
-- provider tokens;
-- `auth.json`;
-- MCP authentication data;
-- session transcript dumps;
-- unrelated private source or user data.
+Context/review input paths must be bounded regular non-symlink UTF-8 files under repository `.scratch/`. Ticket ownership paths are normalized POSIX paths. Worktree, pane, branch, base SHA, result file, and candidate digest must match approved contract.
 
-## Validation-command policy
+## Unattended boundary
 
-`delivery.ticket` accepts narrow test commands and rejects shell syntax including newline, semicolon, pipes, redirection, substitution, and backslash.
+Plan approval does not authorize dependency additions, product/architecture choices, broader ownership, public API breaks, risky migrations, credential/permission changes, model changes, alternate execution, publication, deployment, merge, or cleanup. Such changes block and return to parent/user.
 
-Reason: trusted named workflow can grant host command authority. Freeform shell input would turn workflow arguments into command injection.
+## Result and review safety
 
-Compound validation belongs in a package script and uses structured `{ runner: "npm", script: "..." }`. Direct script paths remain rejected.
-
-## Contract and output paths
-
-Context and ticket inputs must resolve to regular UTF-8 files under repository `.scratch/`. Missing, binary, oversized, traversal, absolute, and symlink-escape inputs fail before child launch. Aggregate contract content is capped at 128 KiB.
-
-`artifactOutputs` accepts at most 16 bounded relative `.scratch/` paths. Runtime rejects traversal, symlinks, non-files, missing files, and files over 50 MiB, then copies declared outputs to run-owned storage before managed worktree cleanup. Handoff manifest records requested-to-saved mappings.
-
-## Unattended mutation boundary
-
-One explicit approval covers only tickets and gates shown in reviewed plan. Worker stops for:
-
-- dependency addition;
-- product or architecture choice;
-- broader ownership;
-- public API break;
-- destructive or irreversible migration;
-- credentials or permissions;
-- model tier escalation;
-- failed provider/model requiring fallback;
-- alternate execution mode;
-- publication or deployment.
-
-## Worktree rules
-
-- Source checkout must be clean before managed worktree launch.
-- One writer per checkout/worktree.
-- Preserve worktree while run ownership, retained resume, review, or handoff is active.
-- Integration and cleanup are parent operations.
-- Dirty or unknown worktree is retained, never discarded automatically.
+Worker completion requires exclusive 0600 result file. Reviewers receive only read, grep, find, ls, and `delivery_result_write`. Scoped tool accepts no path, checks configured nonce, exclusively creates configured 0600 file, and binds verdict to frozen candidate hash. Candidate drift during validation/review blocks.
 
 ## Failure classes
 
-### Reviewer says `needs_fix`
-
-Parent/resource records state and resumes same writer. Maximum rounds defaults to 2 and cannot exceed 3.
-
-### Reviewer says `blocked`
-
-Ticket stops. Parent resolves decision or revises approved plan. Do not convert to implementation fix.
-
-### Validation fails
-
-Writer run fails gate. Inspect exact logs and head. Keep lane blocked until same-protocol retry or approved replacement.
-
-### Provider/model fails
-
-No fallback. Ask operator before choosing another model family or ID.
-
-### Workflow infrastructure fails
-
-Report exact run, cwd, ref, worktree, partial diff, and artifact status. Do not silently switch to shell, external CLI, foreground child, or another runner.
-
-### Parent session closes
-
-Detached child may finish, but completion wake needs originating live session. Recover from mission and exact run state after reopening.
+- `needs_fix`: same retained writer receives accepted findings, up to approved maximum two rounds.
+- `blocked`: decision, protocol, identity, provider, Herdr, validation, scope, or fix-limit failure needs parent action.
+- validation failure: inspect immutable log; do not claim completion.
+- Herdr/model failure: no fallback.
+- `stop_unconfirmed`: recorded worker stop not proven; retain worktree and inspect manually.
+- `stopped`: recorded worker settled only; reviewer inactivity and cleanup safety remain unproven.
+- blocked decision reply: `delivery_reply` is currently unavailable because runtime does not persist `ticket.question`; reserved API rejects normal replies.
+- integration verification failure: preserve `awaiting_integration` evidence and correct parent integration.
+- deleted path: current continuation verifier expects file content, so do not integrate or continue; block and escalate pending deletion support.
+- missing/dead detached runner: state may remain active and inbox unconsumed; send no controls, do not integrate, preserve evidence, and escalate without fallback/replacement.
+- legacy state: unsupported and read-only.
 
 ## Recovery sequence
 
-1. List/show relevant mission.
-2. Inspect linked workflow run and child status.
-3. Inspect transcript or artifact evidence.
-4. Confirm worktree ownership and partial diff.
-5. Resume only child reported eligible, or create one explicit replacement lane from durable handoff.
-6. Update mission `nextReadyAction`.
-7. Continue dependency-ready tickets.
+1. Establish whether detached runner process still exists before sending any control.
+2. If runner is missing or dead, treat run as blocked even when durable phase says `active`.
+3. Send no controls, do not integrate, and do not call `delivery_continue`; inbox has no consumer.
+4. Preserve runner config/state, prompt/result pointers, receipts, patches, validation logs, reviews, handoffs, exact Herdr identities, and worktrees.
+5. Inspect recorded agents/worktrees read-only and escalate.
+6. Never start fallback or replacement writer while ownership or effects remain uncertain.
 
-## Operator commands
+Automatic crash restart/reconciliation is not wired into detached entry. Exact-settled nonce-bound recovery is implemented and unit-tested only as internal runner/scheduler seam; operator cannot invoke it through current tools. Do not imply or manufacture recovery by editing state.
 
-```text
-/subagents-doctor
-/subagents-fleet
-/subagents-steer <run-id> <message>
-/subagents-stop <run-id>
-/subagent-cost
-```
+## Stop and cleanup
 
-Use native notifications. Never add polling or sleep loops merely to watch ordinary async runs.
+`delivery_stop` queues bounded request. Scheduler interrupts only exact recorded worker and waits for that worker to report `done`, `blocked`, or `idle`. Failure to prove worker state records `stop_unconfirmed`. `stopped` does not prove reviewer targets or panes inactive. Stop never removes worktree or runtime evidence.
+
+Manual cleanup requires: manually verified inactivity of recorded worker and every reviewer target and pane, inspected ownership evidence, clean worktree state, accepted or abandoned handoff, and operator-chosen Herdr worktree removal. Preserve and reconcile dirty worktrees; never discard them based on `stopped`. Remove runtime directory only after recovery/audit need ends. No cleanup is automatic.
+
+## Legacy upgrade
+
+Runs from legacy pi-subagents installs cannot be controlled or continued. Preserve legacy directories, settle old agents using old installation, remove old dependency, reinstall current package, verify exact Herdr compatibility, reload Pi, and start fresh run. Never rename legacy state into `.scratch/delivery/`.
+
+## Live validation
+
+Mock tests cover command construction and protocols, not real terminal/server behavior. Before publication, run disposable live fixture described in `CONTRIBUTING.md`, redact evidence, and obtain separate release authority. Package itself performs no publication.

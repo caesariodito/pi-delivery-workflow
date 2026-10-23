@@ -2,105 +2,83 @@
 
 ## Design goal
 
-Provide one repeatable path from ambiguous objective to reviewed implementation while keeping Pi parent authoritative and using native pi-subagents runtime.
+Provide repeatable path from ambiguous objective to reviewed implementation while parent Pi session remains authoritative. Herdr supplies worktrees, panes, agent lifecycle, prompts, waits, reads, stop keys, and notifications. Package supplies contracts, durable state, validation, review binding, scheduling, and Pi controls.
 
 ## Components
 
-### Extension
+### Pi extension
 
-`extensions/delivery-workflow.ts` registers:
+`extensions/delivery-workflow.ts` registers `/delivery` plus model-callable tools and same-name JSON command wrappers:
 
-- `/delivery` command, which sends structured discovery prompt to parent session;
-- `delivery.review`, trusted named workflow resource;
-- `delivery.ticket`, trusted named workflow resource.
+- `delivery_review`
+- `delivery_start`
+- `delivery_status`
+- `delivery_steer`
+- `delivery_reply` (reserved; current state lacks persisted `ticket.question`, so normal blocked-decision replies are rejected)
+- `delivery_continue`
+- `delivery_stop`
 
-Extension owns no daemon, scheduler, database, subprocess manager, or alternate child lifecycle.
+No workflow-resource registry exists. Tools call `extensions/delivery-workflow-core.mjs` directly.
 
-### Workflow core
+### Detached core
 
-`extensions/delivery-workflow-core.mjs` validates plain JSON resource arguments and returns bounded workflow scripts.
+Core validates `.scratch/` review inputs or approved ticket graph, writes durable configuration/state, and spawns Node entry with discrete argv and `shell: false`. `delivery_review` starts standalone review. `delivery_start` starts scheduler. Control tools append exclusive inbox requests.
 
-`delivery.review` launches one fresh, read-only reviewer with structured output:
+### Herdr adapter
 
-```json
-{
-  "verdict": "ok | needs_fix | blocked",
-  "findings": [
-    {
-      "severity": "P0 | P1 | P2",
-      "location": "artifact section or file:line",
-      "problem": "concrete issue",
-      "action": "smallest actionable correction"
-    }
-  ],
-  "summary": "bounded synthesis"
-}
-```
+`extensions/lib/herdr.mjs` uses `execFile` with argv arrays and bounded output/time. Supported baseline is Herdr `0.9.5`, protocol `22`. Adapter maps:
 
-`delivery.ticket`:
-
-1. records ticket `active` in mission state;
-2. materializes bounded ignored `.scratch/` context and ticket files into immutable child task content;
-3. launches worker, optionally in managed worktree;
-4. copies declared ignored outputs into runtime-owned artifact storage before worktree cleanup;
-5. runs allowlisted host validation gate;
-6. records `review`;
-7. launches fresh structured reviewer with same immutable contract;
-8. records `done`, `blocked`, or `needs_fix`;
-9. resumes retained writer for accepted findings;
-10. stops after configured fix-round ceiling.
-
-### Skill
-
-`skills/delivery-workflow/SKILL.md` defines parent protocol: classification, artifacts, spec/plan review, ticket generation, approval, batching, integration, supervision, recovery, and final acceptance.
-
-## Native capability mapping
-
-| Need | Native primitive |
+| Need | Herdr command |
 | --- | --- |
-| Ordered orchestration | Workflow scripts and named resources |
-| Background work | Async workflows and completion notifications |
-| Durable objective | Mission |
-| Ticket lifecycle | Mission `state.get/set` |
-| Independent writers | Managed worktrees |
-| Verification | Host gates and acceptance evidence |
-| Independent critique | Fresh reviewer child |
-| Fix continuation | Retained child resume |
-| Human decision | `contact_supervisor` / `subagent_supervisor` |
-| Operations | Fleet, status, steer, stop, resume |
+| Compatibility | `herdr --version`, `herdr status --json` |
+| Worktree allocation | `herdr worktree create ... --no-focus` |
+| Agent launch | `herdr agent start ... -- <Pi argv>` |
+| Prompt/wait | `herdr agent prompt ... --wait --until ...` |
+| Recovery identity | `herdr agent get` |
+| Stop | `herdr agent send-keys ... C-c`, then `agent wait` |
+| Completion notice | `herdr notification show` |
 
-## Authority model
+Worker Pi argv pins model. Reviewer Pi argv also loads packed `reviewer-result-tool.ts`, binds result path and nonce, and limits tools to `read,grep,find,ls,delivery_result_write`.
 
-Parent controls requirements, product/architecture decisions, finding disposition, integration, final acceptance, and publication.
+### Runner and scheduler
 
-Worker controls implementation choices inside one approved ticket and ownership boundary.
+`extensions/delivery-runner.mjs` exports runtime from `extensions/lib/runner.mjs`. Runner:
 
-Reviewer is read-only and supplies evidence, not authority.
+1. validates immutable approved contract;
+2. asks Herdr for exact approved worktree/path/pane;
+3. starts sole writer and sends prompt-file pointer;
+4. requires exclusive 0600 worker result file;
+5. captures Git evidence and rejects ownership violations;
+6. runs validation executable/argv without shell;
+7. freezes patch and candidate digest;
+8. starts fresh reviewer with scoped result tool;
+9. checks reviewer result, nonce path, candidate hash, and post-review drift;
+10. resumes retained writer for bounded accepted findings;
+11. writes handoff manifest only after clean review.
 
-Mission receipts, tests, and clean reviews remain evidence—not permission to publish.
+Scheduler launches dependency-ready batches, caps concurrency, serializes durable state, pauses at `awaiting_integration`, verifies parent integration, and applies control inbox requests.
 
-## Context strategy
+### Result protocol
 
-Stable `context.md` bundle is immutable after approval. Every worker reads same bundle first, then ticket. Benefits:
+Worker writes one package-prescribed result file. Reviewer cannot use generic write/edit/bash; `delivery_result_write` exclusively creates configured 0600 file after nonce match. Reviewer result binds frozen candidate SHA-256. Missing, malformed, duplicate, unbound, or drifted result blocks lane.
 
-- explicit and inspectable contract;
-- no dependency on hidden parent transcript;
-- stable prefix for possible cache reuse;
-- safe fresh review.
+## Authority
 
-Native fork context remains optional. Current public pi-subagents API forks current parent leaf, not arbitrary earlier session node. Package deliberately avoids private session APIs.
+Parent controls requirements, product/architecture decisions, finding disposition, approved tickets, integration, final acceptance, cleanup, and publication. Worker controls implementation inside approved ownership. Reviewer supplies evidence only.
 
-## Why named resources
+## Durability and recovery
 
-Named workflow resources provide trusted provenance and bounded input validation. Public arguments cannot inject workflow code or arbitrary host commands. Validation command accepts only fixed test-runner shapes and rejects shell operators.
+Run state lives under `.scratch/delivery/<run-id>/`. Prompt files, result pointers, validation logs, frozen patches, receipts, and manifests support inspection. Runner never infers completion from prose. Unknown process/agent identity, partial stop, missing result, or stale ownership blocks rather than spawning replacement.
 
-Current command allowlist is intentionally narrow. Structured `{ runner: "npm", script: "..." }` binds package scripts without concatenating arbitrary shell text. Richer flags remain unsupported.
+Detached entry does not wire automatic crash restart or reconciliation. A dead runner may leave phase `active` and durable inbox requests unconsumed. Operators must treat missing runner as blocked, send no controls, perform no integration, preserve all evidence, and escalate without fallback/replacement. Runner/scheduler exact-settled reconciliation functions are unit-tested internal seams only; detached runtime does not invoke them.
+
+Parent integrates completed batch and calls `delivery_continue` with exact SHA. Scheduler verifies clean checkout, base ancestry, changed-file hashes, and validation before next batch. Verification currently expects content for every changed path, so deletions fail. Any deletion handoff must remain blocked and unintegrated pending deletion support.
 
 ## Limits
 
-- No arbitrary message-tree anchor.
-- No automatic model fallback.
-- No automatic patch integration or worktree cleanup.
-- No automatic publication.
-- One ticket resource handles one ticket; parent batches dependency-ready tickets.
-- Review cannot prove correctness; parent still evaluates evidence.
+- No automatic Herdr install/start/upgrade.
+- No live compatibility claim beyond `0.9.5` protocol `22` until manual fixture evidence exists.
+- No automatic worktree cleanup.
+- No automatic patch integration, merge, push, deploy, release, or publication.
+- No migration from legacy runtime state.
+- No model/provider/execution fallback.

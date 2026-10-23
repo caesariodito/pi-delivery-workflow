@@ -5,54 +5,65 @@
 ```bash
 npm install
 npm run check
+npm pack --dry-run
 ```
+
+Runtime integration additionally requires Git, `herdr 0.9.5` protocol `22`, running Herdr server, Pi, and configured worker/reviewer model IDs. Unit and smoke tests mock Herdr and make no model calls.
 
 ## Design rules
 
-- Native Pi and pi-subagents first.
-- Parent owns decisions and acceptance.
+- Public Pi extension APIs and Herdr CLI only.
+- Parent owns decisions, integration, acceptance, and publication.
 - One writer per checkout/worktree.
-- Fresh, read-only reviewers.
-- Bounded children and fix loops.
-- No service, database, polling loop, or freeform agent chatter.
-- No arbitrary shell command from resource arguments.
+- Fresh read-only reviewers use scoped nonce-bound result tool.
+- Bounded children and at most two fix rounds.
+- Executable and argv stay separate; never evaluate workflow input as shell.
+- Provider, Herdr, worktree, identity, validation, and recovery ambiguity fail closed.
 - Small tasks stay direct.
 
 ## Files
 
-- `extensions/delivery-workflow.ts` — command and resource registration.
-- `extensions/delivery-workflow-core.mjs` — pure argument validation and workflow generation.
+- `extensions/delivery-workflow.ts` — `/delivery`, tools, JSON command wrappers.
+- `extensions/delivery-workflow-core.mjs` — detached runner launch and control surface.
+- `extensions/delivery-runner.mjs` — packed runner exports.
+- `extensions/reviewer-result-tool.ts` — scoped review-result writer.
+- `extensions/lib/` — Herdr adapter, contracts, runner, scheduler, state, Git evidence.
 - `skills/delivery-workflow/SKILL.md` — parent execution policy.
-- `test/smoke.mjs` — no-model runnable self-check.
+- `test/*.test.mjs` — focused Node tests, including package contents.
+- `test/smoke.mjs` — separate no-model smoke check.
 
 ## Test expectations
 
-Every behavior change needs focused assertion. At minimum test:
+Every behavior change needs focused assertion. `npm test` runs all `test/*.test.mjs` once, then smoke once. `npm run check` adds TypeScript checking.
 
-- model routing;
-- fresh review context;
-- generated workflow static validity;
-- state transitions;
-- retained writer fix path;
-- command-injection rejection;
-- fix-round ceiling.
+Before review:
 
-For installed integration, validate generated scripts with:
-
-```text
-subagent({ action: "validate", workflow: "./path/to/generated.js" })
+```bash
+npm run check
+npm pack --dry-run
+node --test test/package.test.mjs
+git diff --check
 ```
 
-Do not run real mutation lanes against production repository for smoke testing.
+Package test verifies packed runner, scoped reviewer extension, runtime modules, and skill; it also rejects legacy runtime imports/dependency entries.
 
-## Release
+## Manual live fixture
 
-Use Conventional Commits. Before release:
+No live Herdr runs belong in automated tests. Before any release, use disposable repository and exact supported Herdr version:
 
-1. run `npm run check`;
-2. install package from local path in disposable Pi profile or trusted test session;
-3. run `/subagents-doctor`;
-4. confirm `/delivery` command and `delivery-workflow` skill load;
-5. validate named resources;
-6. inspect packed files with `npm pack --dry-run`;
-7. tag version.
+1. record `herdr --version` and redacted `herdr status --json`;
+2. reload local package in disposable Pi profile;
+3. run one approved single-ticket fixture through `delivery_start`;
+4. capture worker result pointer, passing validation log, frozen candidate, scoped reviewer result, and handoff manifest;
+5. integrate candidate, call `delivery_continue`, and confirm final state;
+6. run separate stop fixture and verify `stopped` or document `stop_unconfirmed` handling;
+7. confirm retained worktree inspection and manual cleanup;
+8. redact repository paths, prompts, tokens, sessions, and credentials before storing evidence.
+
+Synthetic tests do not authorize publication. They cover internal exact-settled recovery seams, not automatic detached-runner restart/reconciliation. Current integration continuation also does not support deleted paths. Merge, tag, push, package publication, deployment, and release each need separate authority.
+
+## Release and upgrade checks
+
+Legacy pi-subagents state has no migration path. Verify old agents are stopped using old installation, preserve needed evidence, remove old dependency, install this package, validate Herdr compatibility, reload Pi, and start new run. Do not reuse legacy run directories.
+
+Use Conventional Commits. Publication stays out of this workflow.

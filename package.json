@@ -1,7 +1,7 @@
 {
   "name": "pi-delivery-workflow",
   "version": "0.1.0",
-  "description": "Reviewed spec-to-ticket delivery workflow for Pi and pi-subagents",
+  "description": "Reviewed spec-to-ticket delivery workflow for Pi, powered by Herdr",
   "type": "module",
   "license": "MIT",
   "author": "Caesario Dito",
@@ -16,7 +16,8 @@
   "keywords": [
     "pi-package",
     "pi",
-    "pi-subagents",
+    "herdr",
+    "delivery-workflow",
     "workflow",
     "coding-agent"
   ],
@@ -29,11 +30,8 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "node test/smoke.mjs",
-    "check": "npm run test && tsc -p tsconfig.json"
-  },
-  "dependencies": {
-    "pi-subagents": "github:caesariodito/pi-subagents#e755cf1d79178828ec170f1e53d8a5618c3f68a7"
+    "test": "node --test test/*.test.mjs && node test/smoke.mjs",
+    "check": "npm test && tsc -p tsconfig.json"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"

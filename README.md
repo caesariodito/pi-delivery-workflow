@@ -1,63 +1,39 @@
 # pi-delivery-workflow
 
-Reviewed spec-to-ticket delivery for [Pi](https://github.com/earendil-works/pi), built on native [`pi-subagents`](https://github.com/nicobailon/pi-subagents) primitives.
+Reviewed spec-to-ticket delivery for [Pi](https://github.com/earendil-works/pi), with Herdr-managed worktrees and agents.
 
 ```text
-brainstorm
-  ↓
-spec.md → fresh different-family review → revised spec.md
-  ↓
-plan.md → fresh different-family review → revised plan.md
-  ↓
-bounded tickets → explicit approval
-  ↓
-isolated workers → validation gates → fresh review → bounded fixes
-  ↓
-parent acceptance
+brainstorm → spec → fresh review → revise → plan → fresh review → revise
+→ bounded tickets → explicit approval → isolated workers → validation
+→ fresh review → bounded fixes → parent integration and acceptance
 ```
 
-Package adds `/delivery <objective>`, trusted workflow resources, and a skill that keeps requirements, decisions, finding disposition, and final acceptance with parent Pi session.
-
-## Why
-
-Subagents help most through context isolation, independent evidence, and safe parallelism—not simulated organizations. This workflow keeps each child bounded:
-
-- fresh reviewers inspect artifacts without implementation-history bias;
-- one writer owns each checkout or managed worktree;
-- tickets carry explicit ownership, validation, acceptance, and escalation rules;
-- native missions preserve lifecycle and recovery state;
-- native async completion replaces polling;
-- supervisor messaging handles decisions instead of child-to-child chatter.
+Package adds `/delivery <objective>`, seven `delivery_*` tools and matching JSON-argument commands, detached runner, scoped reviewer-result tool, and delivery skill. Parent Pi session retains requirements, decisions, finding disposition, integration, final acceptance, and publication authority.
 
 Small linear tasks remain direct.
 
 ## Requirements
 
 - Pi `1.3.0` or compatible current release
-- `pi-subagents` `0.76.1`
-- configured models matching defaults:
-  - parent/worker: `9router/cx/gpt-5.6-sol`
+- Node.js supported by Pi
+- Git
+- Herdr `0.9.5`, protocol `22`, executable as `herdr`
+- running compatible Herdr server
+- configured models:
+  - worker: `9router/cx/gpt-5.6-sol`
   - reviewer: `9router/cc/claude-opus-5-5`
 
-Model constants currently live in `extensions/delivery-workflow-core.mjs`. Change them before installation if your registry uses other IDs. Model failures block work; package never silently falls back.
+Model constants live in `extensions/delivery-workflow-core.mjs`. Missing or incompatible Herdr, model failures, and provider failures block work. No silent fallback.
 
 ## Install
 
 ```bash
 pi install git:github.com/caesariodito/pi-delivery-workflow
+herdr --version
+herdr status --json
 ```
 
-Restart Pi or run:
-
-```text
-/reload
-```
-
-Confirm setup:
-
-```text
-/subagents-doctor
-```
+Restart Pi or run `/reload`. Package does not install or start Herdr.
 
 ## Quick start
 
@@ -65,17 +41,39 @@ Confirm setup:
 /delivery Add refresh-token rotation with replay detection
 ```
 
-Pi first classifies request:
+Pi classifies request as direct, workflow candidate, or uncertain. Workflow candidates may use `delivery_review` during discovery. Implementation waits for explicit plan-wide approval.
 
-- **Direct** — small and linear; no workflow ceremony.
-- **Workflow candidate** — reviewed spec/plan and ticket execution help materially.
-- **Uncertain** — Pi asks user which mode to use.
+### Tool and command surface
 
-For workflow candidates, discovery and review may run while preparing proposal. Implementation waits for one explicit plan-wide approval. Approved tickets can then run unattended through bounded validation and review gates.
+| Operation | Tool / command |
+| --- | --- |
+| Fresh spec, plan, or implementation review | `delivery_review` |
+| Start approved detached run | `delivery_start` |
+| Read durable state | `delivery_status` |
+| Guide active ticket | `delivery_steer` |
+| Reserved blocked-ticket reply API (currently unavailable) | `delivery_reply` |
+| Continue after verified parent integration | `delivery_continue` |
+| Request worker stop without cleanup | `delivery_stop` |
 
-## Artifacts
+Model-callable tools take JSON objects. Slash-command wrappers use same names and require one JSON object after command name. `/delivery` alone accepts free-text objective.
 
-Workflow writes human contracts under ignored repository scratch path:
+Example start shape:
+
+```json
+{
+  "runId": "refresh-token",
+  "baseSha": "0123456789012345678901234567890123456789",
+  "tickets": "[{\"id\":\"T001\",\"dependencies\":[],\"batch\":1,\"ownedPaths\":[\"src/token.ts\"],\"worktreePath\":\"/absolute/path/to/worktree\",\"branch\":\"delivery/T001\",\"ticket\":\"Approved ticket text\",\"context\":\"Immutable approved context\",\"forbiddenPaths\":[],\"maxFixRounds\":2,\"worker\":{\"name\":\"worker-T001\",\"kind\":\"pi\",\"pane\":\"workspace:1.1\",\"session\":\"worker-session\"},\"reviewer\":{\"name\":\"reviewer-T001\",\"kind\":\"pi\",\"pane\":\"workspace:1.2\",\"session\":\"review-session\"},\"artifactMappings\":{}}]",
+  "validation": { "executable": "npm", "args": ["test"] },
+  "maxConcurrency": 1
+}
+```
+
+`delivery_start` accepts executable plus argv, never shell text. Ticket JSON must carry approved absolute worktree paths and Herdr pane identities prepared by parent/operator. Runtime sends Pi setup as discrete agent argv (`--model`; reviewer also receives `--extension`, nonce-bound result flags, and `--tools`).
+
+## Artifacts and lifecycle
+
+Human contracts:
 
 ```text
 .scratch/<task>/spec.md
@@ -85,56 +83,51 @@ Workflow writes human contracts under ignored repository scratch path:
 .scratch/<task>/tickets/<id>.md
 ```
 
-Add this before first run if repository does not already ignore it:
+Runtime evidence:
 
-```gitignore
-.scratch/
+```text
+.scratch/delivery/<run-id>/
 ```
 
-Mission state stores runtime lifecycle:
+Repository must ignore `.scratch/`. Runtime records prompts, result pointers, validation logs, frozen patches, ticket state, control inbox receipts, and handoff manifests with restrictive permissions.
 
 ```text
 ready → active → review → needs_fix → active → done
                          ↘ blocked
+batch done → awaiting_integration → delivery_continue → next batch/final acceptance
 ```
 
-`blocked` protects product, architecture, security, dependency, migration, provider, and infrastructure decisions from unattended guessing.
+Parent integrates only reviewed `done` handoffs, commits integration, then calls `delivery_continue` with integrated SHA. Runtime verifies clean checkout, ancestry, exact path hashes, and validation before releasing dependent batch. Current integration verification cannot accept deleted paths because it expects `git show <sha>:<path>` content. If a handoff deletes any path, do not integrate or call `delivery_continue`; leave run blocked, preserve evidence, and escalate. Deletion support is pending.
 
-## Safety boundary
+## Supervision and recovery
 
-Plan-wide approval does **not** authorize:
+Use `delivery_status` for current phase and next action. Use `delivery_steer` only for bounded guidance to exact active ticket. `delivery_reply` remains registered for future question persistence, but current runtime never records `ticket.question`; normal blocked-decision replies are rejected. Do not instruct operators to use it. `delivery_stop` interrupts only recorded worker and waits for that worker to settle; it does not stop or prove inactivity of any reviewer. `stop_unconfirmed` requires manual inspection.
 
-- dependency additions;
-- unreviewed product or architecture changes;
-- broader file ownership;
-- public API breaks;
-- risky data migrations;
-- model thinking above medium;
-- model or execution-mode fallback;
-- push, merge, deployment, or release.
+Pi reload does not restart or reconcile a dead detached runner. If runner is missing or has died, state may remain `active` and control inbox requests will not be consumed. Treat run as blocked: do not send controls, integrate, or call `delivery_continue`; preserve state, receipts, Herdr agent/worktree evidence, patches, and handoffs, then escalate. Never launch fallback or replacement writer while ownership remains uncertain. Exact-settled recovery logic exists only as an internal unit-tested seam and is not wired into detached entry.
 
-Those stop and return to parent/user.
+Herdr worktrees are retained. Cleanup is always manual after acceptance or abandonment:
 
-## Context and prompt caching
+1. inspect status, patch, handoff, and Git ownership evidence;
+2. manually verify recorded worker and every reviewer target and pane are inactive;
+3. require clean worktree state; if dirty, preserve and reconcile changes before deliberately cleaning it;
+4. remove worktree with Herdr/operator workflow;
+5. remove `.scratch/delivery/<run-id>/` only after preserving needed evidence.
 
-Workers receive immutable validated contents of `.scratch/<task>/context.md` before ticket details, including in managed worktrees where ignored source files do not exist. Stable bundle gives explicit, inspectable shared prefix and may improve provider KV-cache reuse.
+No automatic cleanup, merge, push, deploy, release, or publication.
 
-Tickets may declare bounded ignored `artifactOutputs`; runtime copies regular files into durable run storage before worktree cleanup and records requested-to-saved mappings.
+## Upgrade from legacy installs
 
-Native `context: "fork"` remains available when transcript inheritance is essential, but pi-subagents forks current persisted parent leaf. It cannot pin arbitrary earlier message-tree node ID. Package avoids custom session surgery until measured cache evidence justifies that seam.
+Runs created by legacy pi-subagents versions are unsupported. Existing `.scratch/pi-subagents` or `.pi/subagents` data is detected read-only; control and continuation refuse it. Preserve legacy evidence, finish or stop old agents with old installation, remove old package dependency, reinstall this package, verify Herdr `0.9.5` protocol `22`, reload Pi, then start new run. No state migration exists.
 
-Fresh Claude-family reviewers intentionally use separate context and model family.
+## Validation status
 
-## Supervision
+Automated tests use mocked Herdr contracts and launch no models. Maintainer release evidence must also include manual disposable-repository live fixture against exact supported Herdr version: status handshake, one worker result, one scoped review result, integration continuation, stop behavior, retained-worktree cleanup, and redacted logs. Current compatibility fixture is synthetic; publication remains prohibited until live evidence and separate release authority exist.
 
-```text
-/subagents-fleet
-/subagents-steer <run-id> <message>
-/subagents-stop <run-id>
-/subagent-cost
+```bash
+npm install
+npm run check
+npm pack --dry-run
 ```
-
-Children ask parent through native supervisor channel for blocking decisions. Async completion wakes originating session. Recovery uses mission list/show, exact run status, and eligible retained-child resume.
 
 ## Documentation
 
@@ -144,19 +137,6 @@ Children ask parent through native supervisor channel for blocking decisions. As
 - [Ticket contract](docs/ticket-contract.md)
 - [Safety and recovery](docs/safety-and-recovery.md)
 - [Development](CONTRIBUTING.md)
-
-## Test
-
-```bash
-npm install
-npm run check
-```
-
-Smoke test uses mocked workflow helpers. It launches no models and changes no project code.
-
-## Inspiration
-
-Workflow was inspired by m3umax's spec → different-model review → plan → review → ticket orchestration described in [this PiCodingAgent discussion](https://www.reddit.com/r/PiCodingAgent/comments/1t6zzwv/do_subagents_really_matter/). This package is an independent implementation using public Pi and pi-subagents APIs; no endorsement implied.
 
 ## License
 
