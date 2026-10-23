@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { createDeliveryRunner, createProcessRunner, RESULT_PROTOCOL, REVIEW_TOOLS, validateTicketRunContract } from "../extensions/lib/runner.mjs";
 
@@ -66,6 +67,13 @@ function writeResult(file, value) {
   fs.chmodSync(file, 0o600);
 }
 
+function writeRecoveryState(directory, state) {
+  const promptPath = path.join(directory, "recovery.prompt");
+  const prompt = "exact persisted prompt\n";
+  fs.writeFileSync(promptPath, prompt, { mode: 0o600 });
+  fs.writeFileSync(path.join(directory, "state.json"), `${JSON.stringify({ ...state, promptPath, promptSha256: createHash("sha256").update(prompt).digest("hex") })}\n`, { mode: 0o600 });
+}
+
 function fakeHerdr(root, verdicts = ["ok"], options = {}) {
   const calls = [];
   let reviews = 0;
@@ -125,6 +133,8 @@ test("validates and deeply freezes approved serial contract", () => {
   assert.ok(Object.isFrozen(checked.worker));
   assert.throws(() => validateTicketRunContract(contract(root, { planApproved: false })), /plan approval/);
   assert.throws(() => validateTicketRunContract(contract(root, { maxFixRounds: 3 })), /0 through 2/);
+  assert.throws(() => validateTicketRunContract(contract(root, { agentTimeoutMs: 300_001 })), /1 through 300000/);
+  assert.equal(validateTicketRunContract(contract(root, { agentTimeoutMs: 45_000 })).agentTimeoutMs, 45_000);
   assert.throws(() => validateTicketRunContract({ ...contract(root), extra: true }), /unsupported fields/);
 });
 
@@ -145,6 +155,8 @@ test("requires Git evidence, passing gate, fresh review, stable hash, and manife
   assert.ok(processRunner.calls.filter((call) => call.executable === "git").every((call) => Array.isArray(call.args)));
   const reviewer = herdr.calls.find(([name, value]) => name === "agentStart" && value.name.startsWith("reviewer-"));
   assert.deepEqual(reviewer[1].agentArgs, ["--model", "reviewer-model", "--tools", "read,grep,find,ls"]);
+  assert.equal(reviewer[1].timeout, 300_000);
+  assert.ok(herdr.calls.filter(([name]) => name === "agentPrompt").every(([, value]) => value.timeout === 300_000 && value.wait === true));
   assert.deepEqual(REVIEW_TOOLS, ["read", "grep", "find", "ls"]);
 });
 
@@ -216,7 +228,7 @@ test("serial recovery harvests exact settled pointer and never prompts on ambigu
   fs.mkdirSync(runDirectory, { recursive: true, mode: 0o700 });
   const resultFile = path.join(runDirectory, "worker-result.json");
   writeResult(resultFile, { version: 1, status: "done", summary: "settled" });
-  fs.writeFileSync(path.join(runDirectory, "state.json"), `${JSON.stringify({ version: 1, runId: "run-1", ticketId: "T003", phase: "worker_waiting", target: "worker-run-1", resultPath: resultFile })}\n`, { mode: 0o600 });
+  writeRecoveryState(runDirectory, { version: 1, runId: "run-1", ticketId: "T003", phase: "worker_waiting", target: "worker-run-1", resultPath: resultFile });
   const herdr = fakeHerdr(root);
   const runner = createDeliveryRunner({ herdr: herdr.adapter });
   const recovered = await runner.recoverSettledResult(input, { expectedTarget: "worker-run-1", expectedKind: "worker" });
@@ -229,7 +241,7 @@ test("serial recovery harvests exact settled pointer and never prompts on ambigu
   fs.mkdirSync(secondDirectory, { recursive: true, mode: 0o700 });
   const secondResult = path.join(secondDirectory, "worker-result.json");
   writeResult(secondResult, { version: 1, status: "done", summary: "settled" });
-  fs.writeFileSync(path.join(secondDirectory, "state.json"), `${JSON.stringify({ version: 1, runId: "run-1", ticketId: "T003", phase: "worker_waiting", target: "worker-run-1", resultPath: secondResult })}\n`, { mode: 0o600 });
+  writeRecoveryState(secondDirectory, { version: 1, runId: "run-1", ticketId: "T003", phase: "worker_waiting", target: "worker-run-1", resultPath: secondResult });
   const ambiguous = await createDeliveryRunner({ herdr: fakeHerdr(secondRoot).adapter }).recoverSettledResult(secondInput, { expectedTarget: "other" });
   assert.equal(ambiguous.status, "blocked");
   assert.match(ambiguous.reason, /ambiguous/);
@@ -367,7 +379,7 @@ test("recovery validates identity and candidate hash, then consumes waiting stat
   const review = path.join(directory, "review.json");
   const hash = "a".repeat(64);
   writeResult(review, { version: 1, verdict: "ok", findings: [], summary: "ok", candidateHash: hash });
-  fs.writeFileSync(path.join(directory, "state.json"), `${JSON.stringify({ version: 1, runId: "run-1", ticketId: "T003", phase: "review_waiting", target: "reviewer", resultPath: review, candidateHash: hash })}\n`, { mode: 0o600 });
+  writeRecoveryState(directory, { version: 1, runId: "run-1", ticketId: "T003", phase: "review_waiting", target: "reviewer", resultPath: review, candidateHash: hash });
   const runner = createDeliveryRunner({ herdr: fakeHerdr(root).adapter });
   const recovered = await runner.recoverSettledResult(input, { expectedTarget: "reviewer", expectedKind: "review", expectedCandidateHash: hash });
   assert.equal(recovered.status, "recovered");

@@ -18,6 +18,7 @@ export type TicketRunContract = Readonly<{
   forbiddenPaths: string[];
   validation: CommandSpec;
   maxFixRounds: number;
+  agentTimeoutMs?: number;
   worker: AgentContract;
   reviewer: AgentContract;
   artifactMappings: Readonly<Record<string, string>>;

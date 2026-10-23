@@ -48,11 +48,13 @@ function agent(value, label) {
 
 export function validateTicketRunContract(value) {
   plain(value, "ticket run contract");
-  exact(value, ["version", "runId", "ticketId", "planApproved", "repositoryPath", "worktreePath", "baseSha", "branch", "ticket", "context", "ownedPaths", "forbiddenPaths", "validation", "maxFixRounds", "worker", "reviewer", "artifactMappings"], "ticket run contract");
+  exact(value, ["version", "runId", "ticketId", "planApproved", "repositoryPath", "worktreePath", "baseSha", "branch", "ticket", "context", "ownedPaths", "forbiddenPaths", "validation", "maxFixRounds", "agentTimeoutMs", "worker", "reviewer", "artifactMappings"], "ticket run contract");
   if (value.version !== 1) throw new TypeError("ticket run contract version must be 1.");
   if (value.planApproved !== true) throw new Error("ticket run requires explicit plan approval.");
   if (typeof value.baseSha !== "string" || !/^[0-9a-f]{40}$|^[0-9a-f]{64}$/.test(value.baseSha)) throw new TypeError("baseSha must be a lowercase Git object ID.");
   if (!Number.isSafeInteger(value.maxFixRounds) || value.maxFixRounds < 0 || value.maxFixRounds > 2) throw new TypeError("maxFixRounds must be an integer from 0 through 2.");
+  const agentTimeoutMs = value.agentTimeoutMs ?? 300_000;
+  if (!Number.isSafeInteger(agentTimeoutMs) || agentTimeoutMs < 1 || agentTimeoutMs > 300_000) throw new TypeError("agentTimeoutMs must be an integer from 1 through 300000.");
   const artifactMappings = value.artifactMappings === undefined ? {} : plain(value.artifactMappings, "artifactMappings");
   for (const [source, target] of Object.entries(artifactMappings)) {
     validateRelativePath(source, { allowDirectoryPrefix: false });
@@ -73,6 +75,7 @@ export function validateTicketRunContract(value) {
     forbiddenPaths: validateOwnedPaths(value.forbiddenPaths).map((entry) => `${entry.path}${entry.directory ? "/" : ""}`),
     validation: validateCommandSpec(value.validation),
     maxFixRounds: value.maxFixRounds,
+    agentTimeoutMs,
     worker: agent(value.worker, "worker"),
     reviewer: agent(value.reviewer, "reviewer"),
     artifactMappings: { ...artifactMappings },
@@ -290,7 +293,7 @@ export function createDeliveryRunner({ herdr, processRunner = createProcessRunne
       const setup = await herdr.worktreeCreate({ cwd: contract.repositoryPath, branch: contract.branch, base: contract.baseSha, path: contract.worktreePath, label: contract.ticketId, focus: false });
       if (!setup?.path || path.resolve(setup.path) !== contract.worktreePath || setup.pane !== contract.worker.pane) throw new Error("Herdr worktree path or pane did not match approved contract.");
       const workerTarget = `${contract.worker.name}-${contract.runId}`;
-      await herdr.agentStart({ name: workerTarget, kind: contract.worker.kind, pane: contract.worker.pane, agentArgs: ["--model", contract.worker.model] });
+      await herdr.agentStart({ name: workerTarget, kind: contract.worker.kind, pane: contract.worker.pane, timeout: contract.agentTimeoutMs, agentArgs: ["--model", contract.worker.model] });
       let findings;
       let candidate;
       let validationLogPath;
@@ -302,7 +305,7 @@ export function createDeliveryRunner({ herdr, processRunner = createProcessRunne
         const prompt = workerPrompt(contract, workerResultPath, findings);
         const promptSha256 = exclusiveWrite(workerPromptPath, prompt);
         writeState({ phase: "worker_waiting", round, target: workerTarget, resultPath: workerResultPath, promptPath: workerPromptPath, promptSha256 });
-        await herdr.agentPrompt({ target: workerTarget, prompt: `Read prompt file ${workerPromptPath} (SHA-256 ${promptSha256}) and follow it exactly.`, wait: true, until: ["done", "blocked"] });
+        await herdr.agentPrompt({ target: workerTarget, prompt: `Read prompt file ${workerPromptPath} (SHA-256 ${promptSha256}) and follow it exactly.`, wait: true, until: ["done", "blocked"], timeout: contract.agentTimeoutMs });
         const workerResult = readResult(runDirectory, workerResultPath, "worker");
         if (workerResult.status === "blocked") return finishBlocked("worker blocked", { workerResult });
         const preGate = await captureGit(processRunner, contract);
@@ -325,8 +328,8 @@ export function createDeliveryRunner({ herdr, processRunner = createProcessRunne
         const reviewPrompt = reviewerPrompt(contract, candidate, reviewerResultPath, patchPath, patchSha256, validationLogPath);
         const reviewPromptSha256 = exclusiveWrite(reviewerPromptPath, reviewPrompt);
         writeState({ phase: "review_waiting", round, target: reviewerTarget, resultPath: reviewerResultPath, promptPath: reviewerPromptPath, promptSha256: reviewPromptSha256, candidateHash: candidate.candidateHash });
-        await herdr.agentStart({ name: reviewerTarget, kind: contract.reviewer.kind, pane: contract.reviewer.pane, agentArgs: ["--model", contract.reviewer.model, "--tools", REVIEW_TOOLS.join(",")] });
-        await herdr.agentPrompt({ target: reviewerTarget, prompt: `Read prompt file ${reviewerPromptPath} (SHA-256 ${reviewPromptSha256}) and follow it exactly.`, wait: true, until: ["done", "blocked"] });
+        await herdr.agentStart({ name: reviewerTarget, kind: contract.reviewer.kind, pane: contract.reviewer.pane, timeout: contract.agentTimeoutMs, agentArgs: ["--model", contract.reviewer.model, "--tools", REVIEW_TOOLS.join(",")] });
+        await herdr.agentPrompt({ target: reviewerTarget, prompt: `Read prompt file ${reviewerPromptPath} (SHA-256 ${reviewPromptSha256}) and follow it exactly.`, wait: true, until: ["done", "blocked"], timeout: contract.agentTimeoutMs });
         const review = readResult(runDirectory, reviewerResultPath, "review");
         if (review.candidateHash !== candidate.candidateHash) return finishBlocked("review did not bind frozen candidate", { review });
         const afterReview = await captureGit(processRunner, contract);
@@ -378,7 +381,10 @@ export function createDeliveryRunner({ herdr, processRunner = createProcessRunne
     try { protocol(herdr); } catch (error) { stop(error instanceof Error ? error.message : String(error)); throw error; }
     let state;
     try { state = readJson(statePath); } catch { return stop("recovery state is missing or ambiguous"); }
-    if (!state || state.version !== 1 || state.runId !== contract.runId || state.ticketId !== contract.ticketId || !["worker_waiting", "review_waiting"].includes(state.phase) || typeof state.target !== "string" || typeof state.resultPath !== "string") return stop("recovery state is ambiguous");
+    if (!state || state.version !== 1 || state.runId !== contract.runId || state.ticketId !== contract.ticketId || !["worker_waiting", "review_waiting"].includes(state.phase) || typeof state.target !== "string" || typeof state.resultPath !== "string" || typeof state.promptPath !== "string" || !/^[0-9a-f]{64}$/.test(state.promptSha256 ?? "")) return stop("recovery state is ambiguous");
+    let promptBytes;
+    try { promptBytes = safeFile(runDirectory, state.promptPath, "recovery prompt"); } catch { return stop("recovery prompt is missing or ambiguous"); }
+    if (sha256(promptBytes) !== state.promptSha256) return stop("recovery prompt digest is ambiguous");
     if ((expectedTarget && state.target !== expectedTarget) || (expectedKind && state.phase !== `${expectedKind}_waiting`) || (expectedCandidateHash && state.candidateHash !== expectedCandidateHash)) return stop("recovery identity is ambiguous");
     let agentState;
     try { agentState = await herdr.agentGet(state.target); } catch (error) { stop(error instanceof Error ? error.message : String(error)); throw error; }
