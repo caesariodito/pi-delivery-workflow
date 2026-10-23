@@ -1,0 +1,2 @@
+first logical line stays whole despite terminal width
+second logical line
