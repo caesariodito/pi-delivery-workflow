@@ -1,254 +1,162 @@
-export const REVIEWER_MODEL = "9router/cc/claude-opus-5-5";
-export const WORKER_MODEL = "9router/cx/gpt-5.6-sol";
-
 import fs from "node:fs";
 import path from "node:path";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { createHash } from "node:crypto";
+import { createDeliveryRunner, createProcessRunner, REVIEW_TOOLS, validateTicketRunContract } from "./delivery-runner.mjs";
+import { createHerdrAdapter } from "./lib/herdr.mjs";
+import { createScheduler, validateTicketGraph } from "./lib/scheduler.mjs";
+import { validateCommandSpec } from "./lib/contracts.mjs";
+import { atomicWriteJson, readJson } from "./lib/state.mjs";
 
-const MAX_CONTRACT_BYTES = 128 * 1024;
+export const REVIEWER_MODEL = "9router/cc/claude-opus-5-5";
+export const WORKER_MODEL = "9router/cx/gpt-5.6-sol";
+const ROOT = path.dirname(fileURLToPath(import.meta.url));
+const ENTRY = fileURLToPath(import.meta.url);
+const MAX_FILE_BYTES = 128 * 1024;
+const LEGACY_PATHS = [".scratch/pi-subagents", ".pi/subagents"];
+const queues = new Map();
+const REVIEW_RESULT_TOOL = "delivery_result_write";
+const REVIEW_EXTENSION = path.join(ROOT, "reviewer-result-tool.ts");
 
-const REVIEW_SCHEMA = {
-  type: "object",
-  properties: {
-    verdict: { enum: ["ok", "needs_fix", "blocked"] },
-    findings: {
-      type: "array",
-      maxItems: 12,
-      items: {
-        type: "object",
-        properties: {
-          severity: { enum: ["P0", "P1", "P2"] },
-          location: { type: "string" },
-          problem: { type: "string" },
-          action: { type: "string" },
-        },
-        required: ["severity", "location", "problem", "action"],
-        additionalProperties: false,
-      },
+function safeId(value, label) {
+  if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value)) throw new TypeError(`${label} must be 1–128 safe characters.`);
+  return value;
+}
+function runtimePath(repositoryPath, runId) { return path.join(repositoryPath, ".scratch", "delivery", safeId(runId, "runId")); }
+function regularTextFile(repositoryPath, relative, label) {
+  if (typeof relative !== "string" || !relative.startsWith(".scratch/") || relative.includes("\0")) throw new TypeError(`${label} must be a .scratch/ path.`);
+  const root = fs.realpathSync(repositoryPath); const requested = path.resolve(root, relative); const stat = fs.lstatSync(requested); const real = fs.realpathSync(requested); const rel = path.relative(root, real);
+  if (!stat.isFile() || stat.isSymbolicLink() || rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel) || stat.size > MAX_FILE_BYTES) throw new TypeError(`${label} must be a bounded regular file inside repository.`);
+  return fs.readFileSync(real, "utf8");
+}
+function result(text, details, isError = false) { return { content: [{ type: "text", text }], details, ...(isError ? { isError: true } : {}) }; }
+function state(repositoryPath, runId) { return readJson(path.join(runtimePath(repositoryPath, runId), "state.json")); }
+function legacy(repositoryPath) { return LEGACY_PATHS.filter((entry) => fs.existsSync(path.join(repositoryPath, entry))); }
+function requestId(action) { return `${action}-${Date.now()}-${Math.random().toString(16).slice(2)}`; }
+
+export function createDeliveryWorkflowCore({ spawnProcess = spawn, now = () => new Date(), random = () => Math.random().toString(16).slice(2), processInbox } = {}) {
+  const launch = (args, repositoryPath) => {
+    const child = spawnProcess(process.execPath, [ENTRY, ...args], { cwd: repositoryPath, env: { ...process.env, DELIVERY_WORKFLOW_PACKAGE_ROOT: ROOT }, detached: true, shell: false, stdio: "ignore" });
+    child.unref();
+    return child.pid;
+  };
+  const enqueue = (key, work) => {
+    const pending = (queues.get(key) ?? Promise.resolve()).then(work);
+    queues.set(key, pending.then(() => undefined, () => undefined));
+    return pending;
+  };
+  const control = async (repositoryPath, input, action) => {
+    const runId = safeId(input.runId, "runId"); const dir = runtimePath(repositoryPath, runId); const old = legacy(repositoryPath); const statePath = path.join(dir, "state.json");
+    if (!fs.existsSync(statePath) && old.length) return result(`Legacy pi-subagents runtime is unsupported for ${action}. Start a new delivery run.`, { status: "unsupported", legacyPaths: old }, true);
+    if (!fs.existsSync(statePath)) return result(`Run ${runId} not found; ${action} was not queued.`, { status: "not_found", runId, action }, true);
+    const request = { version: 1, requestId: requestId(action), runId, action, ...(input.ticketId ? { ticketId: input.ticketId } : {}), ...(input.message ? { message: input.message } : {}), ...(input.integratedSha ? { integratedSha: input.integratedSha } : {}), createdAt: now().toISOString() };
+    const inbox = path.join(dir, "inbox"); fs.mkdirSync(inbox, { recursive: true, mode: 0o700 });
+    atomicWriteJson(path.join(inbox, `${request.requestId}.json`), request);
+    if (processInbox) await enqueue(dir, () => processInbox(dir));
+    return result(`${action} queued for ${runId}.`, { status: "queued", runId, requestId: request.requestId, action });
+  };
+  return Object.freeze({
+    async review(repositoryPath, input) {
+      const runId = safeId(input.runId, "runId"); regularTextFile(repositoryPath, input.artifact, "artifact"); regularTextFile(repositoryPath, input.contextBundle, "contextBundle");
+      const dir = runtimePath(repositoryPath, runId); fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+      const request = { version: 1, runId, kind: input.kind, artifact: input.artifact, contextBundle: input.contextBundle, focus: input.focus ?? "", createdAt: now().toISOString() };
+      const requestPath = path.join(dir, `review-${random()}.json`); atomicWriteJson(requestPath, request); const pid = launch(["review", requestPath], repositoryPath);
+      return result(`Fresh ${input.kind} review launched for ${runId}.`, { status: "launched", runId, pid, requestPath, model: REVIEWER_MODEL, tools: REVIEW_TOOLS });
     },
-    summary: { type: "string" },
-  },
-  required: ["verdict", "findings", "summary"],
-  additionalProperties: false,
-};
-
-function exactKeys(args, allowed) {
-  const extra = Object.keys(args).filter((key) => !allowed.includes(key));
-  return extra.length ? `Unsupported fields: ${extra.join(", ")}.` : undefined;
+    async start(repositoryPath, input) {
+      const runId = safeId(input.runId, "runId"); const dir = runtimePath(repositoryPath, runId);
+      const tickets = JSON.parse(input.tickets);
+      const graph = validateTicketGraph(tickets); const validation = validateCommandSpec(input.validation);
+      for (const ticket of graph) validateTicketRunContract(ticketContract({ runId, repositoryPath, baseSha: input.baseSha, validation }, ticket));
+      const config = { version: 1, runId, repositoryPath, baseSha: input.baseSha, tickets: graph, validation, ...(input.maxConcurrency === undefined ? {} : { maxConcurrency: input.maxConcurrency }) };
+      fs.mkdirSync(path.dirname(dir), { recursive: true, mode: 0o700 });
+      try { fs.mkdirSync(dir, { mode: 0o700 }); } catch (error) { if (error.code === "EEXIST") return result(`Run ${runId} already exists.`, { status: "exists", runId }, true); throw error; }
+      atomicWriteJson(path.join(dir, "config.json"), config);
+      atomicWriteJson(path.join(dir, "state.json"), { version: 1, runId, baseSha: input.baseSha, phase: "ready", tickets: Object.fromEntries(config.tickets.map((ticket) => [ticket.id, { status: "ready", attempt: 0 }])), completedSteps: [], nextAction: "start dependency-ready batch", updatedAt: now().toISOString() });
+      const pid = launch(["run", dir], repositoryPath);
+      return result(`Delivery run ${runId} launched.`, { status: "launched", runId, pid, runtimeDir: dir });
+    },
+    async status(repositoryPath, input) {
+      const old = legacy(repositoryPath); const file = path.join(runtimePath(repositoryPath, input.runId), "state.json");
+      if (!fs.existsSync(file)) return old.length ? result("Legacy pi-subagents runtime detected; control and continuation are unsupported. Start a new delivery run.", { status: "unsupported", legacyPaths: old }) : result(`Run ${input.runId} not found.`, { status: "not_found", runId: input.runId }, true);
+      const current = state(repositoryPath, input.runId); return result(`Run ${input.runId}: ${current.phase}. Next: ${current.nextAction}`, { status: "ok", state: current });
+    },
+    steer: (repositoryPath, input) => control(repositoryPath, input, "steer"),
+    reply: (repositoryPath, input) => control(repositoryPath, input, "reply"),
+    continue: (repositoryPath, input) => control(repositoryPath, input, "continue"),
+    stop: (repositoryPath, input) => control(repositoryPath, input, "stop"),
+  });
 }
 
-function text(args, key, max, required = true) {
-  const value = args[key];
-  if (value === undefined && !required) return undefined;
-  if (typeof value !== "string" || !value.trim() || value.length > max) {
-    return `${key} must contain 1–${max} characters.`;
-  }
-  return undefined;
+function reviewPaths(requestPath) {
+  if (typeof requestPath !== "string" || !path.isAbsolute(requestPath) || path.normalize(requestPath) !== requestPath) throw new TypeError("review request path must be normalized and absolute.");
+  const name = path.basename(requestPath); const match = name.match(/^(review-[A-Za-z0-9._-]+)\.json$/);
+  if (!match) throw new TypeError("review request filename is invalid.");
+  const directory = path.dirname(requestPath); const nonce = match[1];
+  return { requestPath, directory, nonce, resultPath: path.join(directory, `${nonce}-result.json`), statusPath: path.join(directory, `${nonce}-status.json`) };
 }
-
-function safeValidationCommand(command) {
-  // ponytail: fixed test-runner forms only; add argv-style resource fields when projects need custom flags.
-  if (/[\r\n\0;&|`$()<>\\]/.test(command)) return false;
-  return [
-    /^(?:npm|pnpm|yarn) (?:test|run [A-Za-z0-9_.:-]+)$/,
-    /^bun test$/,
-    /^node --test(?: [A-Za-z0-9_./*:-]+)*$/,
-    /^(?:python3? -m pytest|pytest)(?: [A-Za-z0-9_./*:=:-]+)*$/,
-    /^cargo test(?: [A-Za-z0-9_./*:=:-]+)*$/,
-    /^go test(?: [A-Za-z0-9_./*:=:-]+)*$/,
-    /^dotnet test(?: [A-Za-z0-9_./*:=:-]+)*$/,
-  ].some((pattern) => pattern.test(command));
-}
-
-function validationCommand(args) {
-  if (args.validation !== undefined) {
-    if (!args.validation || typeof args.validation !== "object" || Array.isArray(args.validation) || Object.keys(args.validation).some((key) => !["runner", "script"].includes(key))) return { error: "validation must contain only runner and script." };
-    if (args.validation.runner !== "npm" || typeof args.validation.script !== "string" || !/^[A-Za-z0-9_.:-]+$/.test(args.validation.script)) return { error: "validation must be { runner: \"npm\", script: <safe package script> }." };
-    return { command: `npm run ${args.validation.script}` };
-  }
-  if (!safeValidationCommand(args.validationCommand)) return { error: "validationCommand must be one allowlisted test command without shell operators; use npm test, npm run <safe-script>, or structured validation." };
-  return { command: args.validationCommand };
-}
-
-function contractFile(cwd, value, key) {
-  if (typeof value !== "string" || !value.trim() || value.length > 4096) return { error: `${key} must contain 1–4096 characters.` };
-  const root = fs.realpathSync(cwd);
-  const scratch = path.join(root, ".scratch");
-  const requested = path.resolve(root, value);
-  const relative = path.relative(scratch, requested);
-  if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return { error: `${key} must be a contained file under repository .scratch/.` };
-  let stat;
-  let real;
+function writeReviewBlocked(statusPath, error) {
+  const reason = (error instanceof Error ? error.message : String(error)).slice(0, 16_000) || "review failed";
+  const temporary = `${statusPath}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  let fd;
   try {
-    stat = fs.lstatSync(requested);
-    real = fs.realpathSync(requested);
-  } catch {
-    return { error: `${key} must exist.` };
+    fd = fs.openSync(temporary, "wx", 0o600); fs.writeFileSync(fd, `${JSON.stringify({ version: 1, phase: "blocked", reason, updatedAt: new Date().toISOString() })}\n`); fs.fsyncSync(fd); fs.closeSync(fd); fd = undefined;
+    fs.linkSync(temporary, statusPath);
+  } catch (writeError) {
+    if (writeError.code !== "EEXIST") throw writeError;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+    try { fs.unlinkSync(temporary); } catch (unlinkError) { if (unlinkError.code !== "ENOENT") throw unlinkError; }
   }
-  const realRelative = path.relative(scratch, real);
-  if (!stat.isFile() || stat.isSymbolicLink() || realRelative === ".." || realRelative.startsWith(`..${path.sep}`) || path.isAbsolute(realRelative)) return { error: `${key} must be a regular, non-linked file contained under repository .scratch/.` };
-  if (stat.size > MAX_CONTRACT_BYTES) return { error: `${key} exceeds ${MAX_CONTRACT_BYTES} bytes.` };
-  const content = fs.readFileSync(real);
-  if (content.includes(0)) return { error: `${key} must be UTF-8 text, not binary.` };
-  const decoded = new TextDecoder("utf-8", { fatal: true }).decode(content);
-  return { content: decoded };
+}
+function reviewResult(file, expectedHash) {
+  const stat = fs.lstatSync(file); if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o777) !== 0o600) throw new Error("review result must be a regular 0600 file.");
+  const bytes = fs.readFileSync(file); const value = JSON.parse(bytes.toString("utf8"));
+  if (value.version !== 1 || !["ok", "needs_fix", "blocked"].includes(value.verdict) || !Array.isArray(value.findings) || value.findings.length > 12 || value.candidateHash !== expectedHash || typeof value.summary !== "string" || !value.summary || value.summary.length > 16_000) throw new Error("review result schema or candidate hash is invalid.");
+  return { value, sha256: createHash("sha256").update(bytes).digest("hex") };
+}
+export async function runStandaloneReview(requestPath, options = {}) {
+  const paths = reviewPaths(requestPath);
+  try {
+    const repositoryPath = options.cwd ?? process.cwd(); const request = readJson(paths.requestPath);
+    const runId = safeId(request.runId, "runId"); const artifact = regularTextFile(repositoryPath, request.artifact, "artifact"); const context = regularTextFile(repositoryPath, request.contextBundle, "contextBundle");
+    const herdr = options.herdr ?? createHerdrAdapter({ cwd: repositoryPath }); await herdr.status();
+    const target = `delivery-review-${runId}-${paths.nonce}`; const candidateHash = createHash("sha256").update(artifact).digest("hex");
+    const setup = await herdr.worktreeCreate({ cwd: repositoryPath, label: target, focus: false });
+    if (!setup?.pane || !setup?.path) throw new Error("Herdr review workspace lacked pane or path.");
+    await herdr.agentStart({ name: target, kind: "pi", pane: setup.pane, timeout: 300_000, agentArgs: ["--model", REVIEWER_MODEL, "--extension", REVIEW_EXTENSION, "--delivery-result-path", paths.resultPath, "--delivery-result-nonce", paths.nonce, "--tools", [...REVIEW_TOOLS, REVIEW_RESULT_TOOL].join(",")] });
+    await herdr.agentPrompt({ target, wait: true, until: ["done", "blocked"], timeout: 300_000, prompt: `Fresh read-only ${request.kind} review. Do not edit files.\nContext:\n${context}\nArtifact:\n${artifact}\nFocus: ${request.focus || "all approved requirements"}\nCall ${REVIEW_RESULT_TOOL} once with nonce ${paths.nonce}, candidateHash ${candidateHash}, and bounded verdict/findings/summary. No generic write, edit, or bash.` });
+    const checked = reviewResult(paths.resultPath, candidateHash); atomicWriteJson(paths.statusPath, { version: 1, status: "done", resultPath: paths.resultPath, resultSha256: checked.sha256, verdict: checked.value.verdict });
+  } catch (error) {
+    writeReviewBlocked(paths.statusPath, error); throw error;
+  }
+}
+function ticketContract(config, ticket) {
+  const { id, dependencies: _dependencies, batch: _batch, ownedFiles, ...contract } = ticket;
+  return { ...contract, version: 1, runId: config.runId, ticketId: id, planApproved: true, repositoryPath: config.repositoryPath, baseSha: config.baseSha, ownedPaths: contract.ownedPaths ?? ownedFiles, validation: contract.validation ?? config.validation, worker: { ...contract.worker, model: WORKER_MODEL }, reviewer: { ...contract.reviewer, model: REVIEWER_MODEL } };
+}
+async function runMain(runtimeDir) {
+  const config = readJson(path.join(runtimeDir, "config.json")); const processRunner = createProcessRunner(); const herdr = createHerdrAdapter({ cwd: config.repositoryPath }); const runner = createDeliveryRunner({ herdr, processRunner });
+  const scheduler = createScheduler({ repositoryPath: config.repositoryPath, runtimeDir, processRunner, herdr, maxConcurrency: config.maxConcurrency, runTicket: (ticket) => runner.runTicket(ticketContract(config, ticket)) });
+  let inboxQueue = Promise.resolve(); const processSerialized = () => { const next = inboxQueue.then(() => scheduler.processInbox({ tickets: config.tickets, validation: config.validation })); inboxQueue = next.then(() => undefined, () => undefined); return next; };
+  let batch;
+  for (;;) {
+    await processSerialized();
+    const current = readJson(path.join(runtimeDir, "state.json"));
+    if (["done", "stopped", "stop_unconfirmed"].includes(current.phase)) break;
+    if (current.phase === "ready" && !batch) batch = scheduler.startBatch(config.tickets).finally(() => { batch = undefined; });
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  if (batch) await batch;
 }
 
-function artifactOutputs(value) {
-  if (value === undefined) return { paths: [] };
-  if (!Array.isArray(value) || value.length > 16 || value.some((item) => typeof item !== "string" || !item || item.length > 1024 || !item.startsWith(".scratch/") || /^[/\\]|(?:^|[/\\])\.\.(?:[/\\]|$)/.test(item) || /[\u0000-\u001f\u007f]/.test(item))) return { error: "artifactOutputs must contain at most 16 bounded relative .scratch/ paths without traversal or control characters." };
-  return { paths: value };
-}
-
-export function resolveReview(args) {
-  const keysError = exactKeys(args, ["kind", "artifact", "contextBundle", "focus"]);
-  if (keysError) return { error: keysError };
-  if (!['spec', 'plan', 'implementation'].includes(args.kind)) {
-    return { error: "kind must be spec, plan, or implementation." };
-  }
-  for (const [key, max, required] of [
-    ["artifact", 4096, true],
-    ["contextBundle", 4096, true],
-    ["focus", 4000, false],
-  ]) {
-    const error = text(args, key, max, required);
-    if (error) return { error };
-  }
-
-  const task = [
-    `Review the ${args.kind} artifact at ${args.artifact}.`,
-    `Read the stable context bundle at ${args.contextBundle} first.`,
-    args.focus ? `Review focus: ${args.focus}` : "",
-    "Authority: read-only. Do not edit project or artifact files.",
-    "Return only concrete, actionable findings supported by the artifact, repository source, or an explicit contract.",
-    "Do not rewrite the artifact. Mark clean work as verdict ok. Use blocked only for an unapproved product, architecture, security, or scope decision.",
-  ].filter(Boolean).join("\n");
-
-  return {
-    script: `return runs.run("review", ${JSON.stringify({
-      label: `Review ${args.kind}`,
-      agent: "reviewer",
-      task,
-      context: "fresh",
-      model: REVIEWER_MODEL,
-      outputSchema: REVIEW_SCHEMA,
-    })});`,
-  };
-}
-
-export function resolveTicket(args, context = { cwd: process.cwd() }) {
-  const allowed = [
-    "ticketId", "ticketPath", "contextBundle", "validationCommand", "validation", "artifactOutputs",
-    "ownedFiles", "forbiddenFiles", "isolated", "maxFixRounds",
-  ];
-  const keysError = exactKeys(args, allowed);
-  if (keysError) return { error: keysError };
-  const ticketIdError = text(args, "ticketId", 128, true);
-  if (ticketIdError) return { error: ticketIdError };
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(args.ticketId)) return { error: "ticketId must be a safe workflow key." };
-  if ((args.validationCommand === undefined) === (args.validation === undefined)) return { error: "Specify exactly one of validationCommand or validation." };
-  if (args.validationCommand !== undefined) {
-    const error = text(args, "validationCommand", 2000, true);
-    if (error) return { error };
-  }
-  const validated = validationCommand(args);
-  if (validated.error) return validated;
-  const contextFile = contractFile(context.cwd, args.contextBundle, "contextBundle");
-  if (contextFile.error) return contextFile;
-  const ticketFile = contractFile(context.cwd, args.ticketPath, "ticketPath");
-  if (ticketFile.error) return ticketFile;
-  if (Buffer.byteLength(contextFile.content) + Buffer.byteLength(ticketFile.content) > MAX_CONTRACT_BYTES) return { error: `Contract inputs exceed ${MAX_CONTRACT_BYTES} aggregate bytes.` };
-  const outputs = artifactOutputs(args.artifactOutputs);
-  if (outputs.error) return outputs;
-  for (const key of ["ownedFiles", "forbiddenFiles"]) {
-    if (!Array.isArray(args[key]) || args[key].length > 64 || args[key].some((item) => typeof item !== "string" || !item.trim() || item.length > 1024)) {
-      return { error: `${key} must be an array of at most 64 non-empty paths.` };
-    }
-  }
-  if (typeof args.isolated !== "boolean") return { error: "isolated must be boolean." };
-  if (!Number.isSafeInteger(args.maxFixRounds) || args.maxFixRounds < 0 || args.maxFixRounds > 3) {
-    return { error: "maxFixRounds must be an integer from 0 through 3." };
-  }
-
-  const packet = [
-    `Ticket: ${args.ticketId}`,
-    `Immutable context bundle (${args.contextBundle}):\n${contextFile.content}`,
-    `Immutable ticket (${args.ticketPath}):\n${ticketFile.content}`,
-    `Owned files/contracts: ${args.ownedFiles.join(", ") || "none declared"}`,
-    `Forbidden files: ${args.forbiddenFiles.join(", ") || "none declared"}`,
-    `Validation command: ${validated.command}`,
-    "Implement only approved ticket scope. You are sole writer for this checkout/worktree.",
-    "Run focused validation. Ask supervisor instead of making unapproved product, architecture, dependency, migration, security, or public-API decisions.",
-    "Report changed files, validation evidence, residual risks, and any blocked decision.",
-  ].join("\n");
-
-  const reviewTask = [
-    `Review implementation for ticket ${args.ticketId}.`,
-    `Use this same immutable contract content:\n${contextFile.content}\n\n${ticketFile.content}`,
-    "Inspect candidate handoff artifacts, captured patch, and validation evidence supplied below. Authority: read-only; do not edit.",
-    "Return actionable findings only. Use needs_fix for bounded implementation defects and blocked for decisions outside approved scope.",
-  ].join("\n");
-
-  const writer = {
-    label: `Implement ${args.ticketId}`,
-    agent: "worker",
-    task: packet,
-    context: "fresh",
-    model: WORKER_MODEL,
-    worktree: args.isolated,
-    gate: validated.command,
-    artifactOutputs: outputs.paths,
-  };
-  const reviewer = {
-    label: `Review ${args.ticketId}`,
-    agent: "reviewer",
-    task: reviewTask,
-    context: "fresh",
-    model: REVIEWER_MODEL,
-    outputSchema: REVIEW_SCHEMA,
-  };
-
-  const script = `
-const ticketKey = ${JSON.stringify(`ticket-${args.ticketId}`)};
-await state.set(ticketKey, { status: "active", attempt: 1, nextAction: "implement" });
-let candidate = await runs.run("writer-1", ${JSON.stringify(writer)});
-if (!candidate.ok) {
-  await state.set(ticketKey, { status: "blocked", attempt: 1, writerRunId: candidate.runId ?? null, nextAction: "inspect writer failure" });
-  return { ticketId: ${JSON.stringify(args.ticketId)}, status: "blocked", candidate };
-}
-let review;
-for (let round = 0; round <= ${args.maxFixRounds}; round += 1) {
-  await state.set(ticketKey, { status: "review", attempt: round + 1, writerRunId: candidate.runId ?? null, nextAction: "review" });
-  review = await runs.run("review-" + (round + 1), {
-    ...${JSON.stringify(reviewer)},
-    task: ${JSON.stringify(reviewTask)} + "\\nCandidate evidence: " + JSON.stringify({ output: candidate.output, outputReference: candidate.outputReference, outputPathMapping: candidate.outputPathMapping, artifactPaths: candidate.artifactPaths })
+if (process.argv[1] === ENTRY) {
+  const [mode, target] = process.argv.slice(2);
+  const main = mode === "run" ? runMain(target) : mode === "review" ? runStandaloneReview(target) : Promise.reject(new Error("unknown delivery runner mode"));
+  main.catch((error) => {
+    if (mode === "run" && target) try { const current = readJson(path.join(target, "state.json")); atomicWriteJson(path.join(target, "state.json"), { ...current, phase: "blocked", nextAction: "inspect detached runner failure", reason: error instanceof Error ? error.message : String(error), updatedAt: new Date().toISOString() }); } catch { /* Existing durable state may itself be unreadable. */ }
+    if (mode === "review" && target) try { writeReviewBlocked(reviewPaths(target).statusPath, error); } catch { /* Review main already persisted or trusted path was invalid. */ }
+    process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`); process.exitCode = 1;
   });
-  if (!review.ok || review.structuredOutput?.verdict === "blocked") {
-    await state.set(ticketKey, { status: "blocked", attempt: round + 1, writerRunId: candidate.runId ?? null, reviewRunId: review.runId ?? null, nextAction: "parent decision" });
-    return { ticketId: ${JSON.stringify(args.ticketId)}, status: "blocked", candidate, review };
-  }
-  if (review.structuredOutput?.verdict === "ok") {
-    await state.set(ticketKey, { status: "done", attempt: round + 1, writerRunId: candidate.runId ?? null, reviewRunId: review.runId ?? null, nextAction: "parent acceptance" });
-    return { ticketId: ${JSON.stringify(args.ticketId)}, status: "done", candidate, review, outputReference: candidate.outputReference, outputPathMapping: candidate.outputPathMapping, artifactPaths: candidate.artifactPaths };
-  }
-  if (round === ${args.maxFixRounds}) break;
-  await state.set(ticketKey, { status: "needs_fix", attempt: round + 1, writerRunId: candidate.runId ?? null, reviewRunId: review.runId ?? null, nextAction: "apply accepted findings" });
-  if (!candidate.runId) {
-    await state.set(ticketKey, { status: "blocked", attempt: round + 1, reviewRunId: review.runId ?? null, nextAction: "writer is not resumable" });
-    return { ticketId: ${JSON.stringify(args.ticketId)}, status: "blocked", candidate, review, reason: "writer is not resumable" };
-  }
-  const fixTask = ${JSON.stringify(packet)} + "\\nApply only these accepted review findings, then rerun the ticket validation command:\\n" + JSON.stringify(review.structuredOutput?.findings ?? []);
-  candidate = await runs.run("fix-" + (round + 1), {
-    resume: candidate.runId,
-    label: "Fix ${args.ticketId}",
-    task: fixTask
-  });
-  if (!candidate.ok) {
-    await state.set(ticketKey, { status: "blocked", attempt: round + 2, writerRunId: candidate.runId ?? null, nextAction: "inspect fix failure" });
-    return { ticketId: ${JSON.stringify(args.ticketId)}, status: "blocked", candidate, review };
-  }
-}
-await state.set(ticketKey, { status: "blocked", attempt: ${args.maxFixRounds + 1}, writerRunId: candidate.runId ?? null, reviewRunId: review?.runId ?? null, nextAction: "fix-round limit reached" });
-return { ticketId: ${JSON.stringify(args.ticketId)}, status: "blocked", candidate, review, reason: "fix-round limit reached" };
-`;
-  return { script };
 }

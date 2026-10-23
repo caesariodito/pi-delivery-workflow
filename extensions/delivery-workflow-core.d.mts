@@ -1,7 +1,15 @@
 export const REVIEWER_MODEL: string;
 export const WORKER_MODEL: string;
 
-export type WorkflowResolution = { script: string } | { error: string };
-
-export function resolveReview(args: Readonly<Record<string, unknown>>): WorkflowResolution;
-export function resolveTicket(args: Readonly<Record<string, unknown>>): WorkflowResolution;
+export type ToolResult = { content: { type: "text"; text: string }[]; details: Readonly<Record<string, unknown>>; isError?: boolean };
+export type DeliveryWorkflowCore = Readonly<{
+  review(repositoryPath: string, input: Readonly<Record<string, any>>): Promise<ToolResult>;
+  start(repositoryPath: string, input: Readonly<Record<string, any>>): Promise<ToolResult>;
+  status(repositoryPath: string, input: Readonly<Record<string, any>>): Promise<ToolResult>;
+  steer(repositoryPath: string, input: Readonly<Record<string, any>>): Promise<ToolResult>;
+  reply(repositoryPath: string, input: Readonly<Record<string, any>>): Promise<ToolResult>;
+  continue(repositoryPath: string, input: Readonly<Record<string, any>>): Promise<ToolResult>;
+  stop(repositoryPath: string, input: Readonly<Record<string, any>>): Promise<ToolResult>;
+}>;
+export function createDeliveryWorkflowCore(options?: Readonly<Record<string, any>>): DeliveryWorkflowCore;
+export function runStandaloneReview(requestPath: string, options?: Readonly<Record<string, any>>): Promise<void>;

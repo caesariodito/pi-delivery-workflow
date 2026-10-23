@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { validateCommandSpec, validateOwnedPaths, validateRelativePath, validateRunId, validateTicketId } from "./contracts.mjs";
 import { createHandoffManifest, findOwnershipViolations, parsePorcelainV1Z, sha256 } from "./git-evidence.mjs";
 import { atomicWriteJson, readJson } from "./state.mjs";
@@ -10,6 +11,8 @@ const MAX_TEXT = 128 * 1024;
 const DEFAULT_PROCESS_TIMEOUT_MS = 120_000;
 const DEFAULT_PROCESS_OUTPUT_BYTES = 4 * 1024 * 1024;
 const REVIEW_TOOLS = Object.freeze(["read", "grep", "find", "ls"]);
+const REVIEW_RESULT_TOOL = "delivery_result_write";
+const REVIEW_EXTENSION = fileURLToPath(new URL("../reviewer-result-tool.ts", import.meta.url));
 const RESULT_PROTOCOL = "result-file-pointer";
 const REVIEW_VERDICTS = new Set(["ok", "needs_fix", "blocked"]);
 
@@ -248,7 +251,7 @@ function workerPrompt(contract, resultPath, fix) {
   ].join("\n\n");
 }
 
-function reviewerPrompt(contract, candidate, resultPath, patchPath, patchSha256, validationLogPath) {
+function reviewerPrompt(contract, candidate, resultPath, resultNonce, patchPath, patchSha256, validationLogPath) {
   return [
     `Fresh read-only review for ${contract.ticketId}. Do not edit files.`,
     `Approved worktree: ${contract.worktreePath}`,
@@ -261,7 +264,8 @@ function reviewerPrompt(contract, candidate, resultPath, patchPath, patchSha256,
     `Passing validation log: ${validationLogPath}`,
     `Changed paths: ${candidate.changedPaths.join(", ") || "none"}`,
     "Use only read, grep, find, and ls tools.",
-    `Write JSON result to ${resultPath} with mode 0600: {"version":1,"verdict":"ok|needs_fix|blocked","findings":[{"severity":"P0|P1|P2","location":"...","problem":"...","action":"..."}],"summary":"...","candidateHash":"${candidate.candidateHash}"}.`,
+    `Call ${REVIEW_RESULT_TOOL} exactly once with nonce ${resultNonce} and: {"verdict":"ok|needs_fix|blocked","findings":[{"severity":"P0|P1|P2","location":"...","problem":"...","action":"..."}],"summary":"...","candidateHash":"${candidate.candidateHash}"}.`,
+    `The scoped tool writes only ${resultPath} with mode 0600. Do not use generic write, edit, or bash.`,
     "Result file is sole completion protocol.",
   ].join("\n\n");
 }
@@ -325,10 +329,10 @@ export function createDeliveryRunner({ herdr, processRunner = createProcessRunne
         const reviewerResultPath = path.join(runDirectory, `review-${round}-${reviewerNonce}.json`);
         const reviewerPromptPath = path.join(runDirectory, `review-${round}-${reviewerNonce}.prompt`);
         requireAbsent(reviewerResultPath, "review result");
-        const reviewPrompt = reviewerPrompt(contract, candidate, reviewerResultPath, patchPath, patchSha256, validationLogPath);
+        const reviewPrompt = reviewerPrompt(contract, candidate, reviewerResultPath, reviewerNonce, patchPath, patchSha256, validationLogPath);
         const reviewPromptSha256 = exclusiveWrite(reviewerPromptPath, reviewPrompt);
         writeState({ phase: "review_waiting", round, target: reviewerTarget, resultPath: reviewerResultPath, promptPath: reviewerPromptPath, promptSha256: reviewPromptSha256, candidateHash: candidate.candidateHash });
-        await herdr.agentStart({ name: reviewerTarget, kind: contract.reviewer.kind, pane: contract.reviewer.pane, timeout: contract.agentTimeoutMs, agentArgs: ["--model", contract.reviewer.model, "--tools", REVIEW_TOOLS.join(",")] });
+        await herdr.agentStart({ name: reviewerTarget, kind: contract.reviewer.kind, pane: contract.reviewer.pane, timeout: contract.agentTimeoutMs, agentArgs: ["--model", contract.reviewer.model, "--extension", REVIEW_EXTENSION, "--delivery-result-path", reviewerResultPath, "--delivery-result-nonce", reviewerNonce, "--tools", [...REVIEW_TOOLS, REVIEW_RESULT_TOOL].join(",")] });
         await herdr.agentPrompt({ target: reviewerTarget, prompt: `Read prompt file ${reviewerPromptPath} (SHA-256 ${reviewPromptSha256}) and follow it exactly.`, wait: true, until: ["done", "blocked"], timeout: contract.agentTimeoutMs });
         const review = readResult(runDirectory, reviewerResultPath, "review");
         if (review.candidateHash !== candidate.candidateHash) return finishBlocked("review did not bind frozen candidate", { review });

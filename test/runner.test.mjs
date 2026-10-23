@@ -57,7 +57,7 @@ function pointer(prompt) {
 
 function resultPath(promptFile) {
   const content = fs.readFileSync(promptFile, "utf8");
-  const match = content.match(/Write JSON result to ([^\n]+) with mode 0600/);
+  const match = content.match(/Write JSON result to ([^\n]+) with mode 0600/) ?? content.match(/scoped tool writes only ([^\n]+) with mode 0600/);
   assert.ok(match);
   return { content, path: match[1] };
 }
@@ -153,8 +153,15 @@ test("requires Git evidence, passing gate, fresh review, stable hash, and manife
   assert.equal(notices.length, 1);
   assert.ok(processRunner.calls.some((call) => call.executable === process.execPath));
   assert.ok(processRunner.calls.filter((call) => call.executable === "git").every((call) => Array.isArray(call.args)));
+  const worker = herdr.calls.find(([name, value]) => name === "agentStart" && value.name.startsWith("worker-"));
+  assert.equal(worker[1].agentArgs.includes("--extension"), false);
   const reviewer = herdr.calls.find(([name, value]) => name === "agentStart" && value.name.startsWith("reviewer-"));
-  assert.deepEqual(reviewer[1].agentArgs, ["--model", "reviewer-model", "--tools", "read,grep,find,ls"]);
+  assert.deepEqual(reviewer[1].agentArgs.slice(0, 2), ["--model", "reviewer-model"]);
+  assert.match(reviewer[1].agentArgs[3], /reviewer-result-tool\.ts$/);
+  assert.equal(reviewer[1].agentArgs.at(-1), "read,grep,find,ls,delivery_result_write");
+  assert.equal(reviewer[1].agentArgs.at(-1).includes("write"), true);
+  assert.equal(reviewer[1].agentArgs.at(-1).includes("edit"), false);
+  assert.equal(reviewer[1].agentArgs.at(-1).includes("bash"), false);
   assert.equal(reviewer[1].timeout, 300_000);
   assert.ok(herdr.calls.filter(([name]) => name === "agentPrompt").every(([, value]) => value.timeout === 300_000 && value.wait === true));
   assert.deepEqual(REVIEW_TOOLS, ["read", "grep", "find", "ls"]);
