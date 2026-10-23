@@ -31,9 +31,11 @@ Create durable human artifacts:
 
 Use mission state only for runtime lifecycle and recovery. Artifacts remain human-readable contracts.
 
-## 3. Brainstorm and review specification
+If finalized `implementation-review` artifacts exist for this task, use them from the same `.scratch/<task>/` directory. Validate source JSON and require rebuilt review pages with no unresolved implementation-blocking questions. Treat JSON as source; HTML and exported answers are review transport only.
 
-Brainstorm requirements with user. Parent writes `spec.md` containing problem, goals, non-goals, behavior, contracts, constraints, acceptance criteria, and open decisions.
+## 3. Compose and review specification
+
+Use finalized `implementation-plan.json`, when present, for `spec.md` problem, goals, scope, non-goals, and acceptance criteria. Enrich it from `technical-spec.json`, when present, with behavior, contracts, data, architecture, trust boundaries, failure handling, security, technical verification, constraints, and open technical decisions. Preserve stable IDs as references where useful. If no review artifacts exist, brainstorm requirements with user and write the same contract. Ask only about missing, conflicting, product, or architecture decisions; do not repeat settled review questions.
 
 Review with named workflow resource:
 
@@ -52,9 +54,9 @@ subagent({
 
 Resource uses fresh `9router/cc/claude-opus-5-5` reviewer at medium thinking. Reviewer is read-only and returns structured actionable findings. Parent classifies every finding as valid, stale, invalid, speculative, or blocked, then revises accepted findings. Ask user about product or architecture decisions.
 
-## 4. Plan, review, and ticket
+## 4. Compose plan, review, and ticket
 
-Parent writes `plan.md`: seams, contracts/files, ordering, failure handling, validation, rollout risk, and ticket boundaries. Run same fresh review with `kind: "plan"`, then revise accepted findings.
+Use finalized `implementation-plan.json`, when present, to compose `plan.md`: business context, scope, seams, contracts/files, workstreams, ordering, ownership, dependencies, validation, rollout risk, definition of done, and ticket boundaries. Otherwise write the same plan from the reviewed specification. Technical detail stays in `spec.md`; reference it instead of duplicating it. Resolve source conflicts by owning document: `technical-spec.json` owns technical contracts and `implementation-plan.json` owns delivery decisions. Run the same fresh review with `kind: "plan"`, then revise accepted findings.
 
 Write immutable `context.md` after spec and plan stabilize. Put approved objective, artifact paths and digests, repository/ref, decisions, constraints, validation conventions, and escalation rules first. Workers receive this stable bundle rather than full parent transcript. Use `context: "fork"` only when inherited history is essential; native fork uses current parent leaf and cannot pin an arbitrary earlier node.
 
