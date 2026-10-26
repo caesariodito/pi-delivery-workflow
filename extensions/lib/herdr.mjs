@@ -151,7 +151,12 @@ export function createHerdrAdapter({
       return execute(["worktree", "list", ...(workspace ? ["--workspace", identifier(workspace, "workspace")] : []), ...(worktreeCwd ? ["--cwd", text(worktreeCwd, "cwd")] : []), ...(trustRepository ? ["--trust-repository"] : [])]);
     },
     async worktreeCreate({ workspace, cwd: worktreeCwd, branch, base, path, label, focus = false, trustRepository = false } = {}) {
-      return execute(["worktree", "create", ...(workspace ? ["--workspace", identifier(workspace, "workspace")] : []), ...(worktreeCwd ? ["--cwd", text(worktreeCwd, "cwd")] : []), ...(branch ? ["--branch", text(branch, "branch")] : []), ...(base ? ["--base", text(base, "base")] : []), ...(path ? ["--path", text(path, "path")] : []), ...(label ? ["--label", text(label, "label")] : []), focus ? "--focus" : "--no-focus", ...(trustRepository ? ["--trust-repository"] : [])]);
+      const result = await execute(["worktree", "create", ...(workspace ? ["--workspace", identifier(workspace, "workspace")] : []), ...(worktreeCwd ? ["--cwd", text(worktreeCwd, "cwd")] : []), ...(branch ? ["--branch", text(branch, "branch")] : []), ...(base ? ["--base", text(base, "base")] : []), ...(path ? ["--path", text(path, "path")] : []), ...(label ? ["--label", text(label, "label")] : []), focus ? "--focus" : "--no-focus", ...(trustRepository ? ["--trust-repository"] : [])]);
+      return {
+        ...result,
+        path: result.path ?? result.worktree?.path ?? result.workspace?.worktree?.checkout_path,
+        pane: result.pane ?? result.root_pane?.pane_id,
+      };
     },
     async agentStart({ name, kind, pane, timeout = timeoutMs, agentArgs = [] }) {
       if (!Array.isArray(agentArgs) || agentArgs.some((arg) => typeof arg !== "string")) throw new TypeError("agentArgs must be an array of strings");

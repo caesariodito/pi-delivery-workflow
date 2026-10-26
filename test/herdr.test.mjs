@@ -53,7 +53,9 @@ test("normalizes version, status, integration, worktree, agent, and notification
     { name: "codex", status: "not installed", path: "/tmp/codex" },
   ]);
   await adapter.worktreeList({ cwd: "/tmp/repo path" });
-  await adapter.worktreeCreate({ branch: "ticket;echo unsafe", base: "main", path: "/tmp/work tree", label: "Ticket", focus: false });
+  const worktree = await adapter.worktreeCreate({ branch: "ticket;echo unsafe", base: "main", path: "/tmp/work tree", label: "Ticket", focus: false });
+  assert.equal(worktree.path, "/tmp/work tree");
+  assert.equal(worktree.pane, "w1:p1");
   await adapter.agentStart({ name: "worker", kind: "pi", pane: "w1:p1", agentArgs: ["--model", "name with spaces"] });
   const prompted = await adapter.agentPrompt({ target: "worker", prompt: "-do work; echo unsafe", wait: true, until: ["done", "blocked"], timeout: 1500 });
   assert.equal(prompted.type, "agent_prompted");
