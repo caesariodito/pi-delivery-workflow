@@ -1,84 +1,50 @@
 # Architecture
 
-## Design goal
+## Shape
 
-Provide repeatable path from ambiguous objective to reviewed implementation while parent Pi session remains authoritative. Herdr supplies worktrees, panes, agent lifecycle, prompts, waits, reads, stop keys, and notifications. Package supplies contracts, durable state, validation, review binding, scheduling, and Pi controls.
+```text
+Pi parent
+  ├─ validates approved ticket graph
+  ├─ writes bounded ticket context packets
+  ├─ launches ready work through Herdr
+  ├─ waits for result and runs validation
+  ├─ records concise handoff
+  └─ pauses for parent integration when needed
+
+Herdr
+  └─ owns visible worktrees, panes, and agent processes
+```
+
+No package daemon exists. Package does not reproduce pi-subagents missions, journals, takeover, automatic reviewer loops, or transparent recovery.
 
 ## Components
 
-### Pi extension
+- `extensions/delivery-workflow.ts` — `/delivery` and five bounded tools.
+- `extensions/delivery-workflow-core.mjs` — attached orchestration, status, steer, stop, continuation.
+- `extensions/lib/scheduler.mjs` — graph validation, readiness, context packet generation.
+- `extensions/lib/herdr.mjs` — argv-only Herdr CLI adapter for baseline `0.9.5`, protocol `22`.
+- `extensions/reviewer-result-tool.ts` — nonce-bound ticket result writer.
 
-`extensions/delivery-workflow.ts` registers `/delivery` plus model-callable tools and same-name JSON command wrappers:
+## Ticket execution
 
-- `delivery_review`
-- `delivery_start`
-- `delivery_status`
-- `delivery_steer`
-- `delivery_reply` (reserved; current state lacks persisted `ticket.question`, so normal blocked-decision replies are rejected)
-- `delivery_continue`
-- `delivery_stop`
+1. Verify clean parent checkout and exact base SHA.
+2. Create visible Herdr worktree and pane.
+3. Write `.scratch/delivery/<run>/prompts/<ticket>.md`.
+4. Start approved Pi model/tools in returned pane.
+5. Prompt agent with context-packet path.
+6. Wait for settled Herdr state and nonce-bound result file.
+7. Run ticket validation with executable/argv and `shell: false`.
+8. Read Git status, reject paths outside ownership, and write handoff.
+9. Launch newly ready tickets or pause for parent integration.
 
-No workflow-resource registry exists. Tools call `extensions/delivery-workflow-core.mjs` directly.
+Context packet carries objective, goal, done criteria, paths, base, ownership, dependencies, concise handoffs, source-document pointers, validation, model/tools, guidance, result schema, and escalation rules.
 
-### Detached core
+## State
 
-Core validates `.scratch/` review inputs or approved ticket graph, writes durable configuration/state, and spawns Node entry with discrete argv and `shell: false`. `delivery_review` starts standalone review. `delivery_start` starts scheduler. Control tools append exclusive inbox requests.
+`run.json` and `status.json` are inspection records. Prompt, result, handoff, and validation log remain readable under ignored `.scratch/`. They are not a transactional journal. If orchestrator dies, state may describe interrupted work; operator inspects Herdr and chooses a new supervised run.
 
-### Herdr adapter
+## Authority and limits
 
-`extensions/lib/herdr.mjs` uses `execFile` with argv arrays and bounded output/time. Supported baseline is Herdr `0.9.5`, protocol `22`. Adapter maps:
+Parent owns product/architecture decisions, ticket approval, integration, cleanup, and publication. Package may launch approved ready tickets and validation. It never merges, applies patches, cleans panes/worktrees, changes model/provider, installs dependencies, or replays ambiguous actions.
 
-| Need | Herdr command |
-| --- | --- |
-| Compatibility | `herdr --version`, `herdr status --json` |
-| Worktree allocation | `herdr worktree create ... --no-focus` |
-| Agent launch | `herdr agent start ... -- <Pi argv>` |
-| Prompt/wait | `herdr agent prompt ... --wait --until ...` |
-| Recovery identity | `herdr agent get` |
-| Stop | `herdr agent send-keys ... C-c`, then `agent wait` |
-| Completion notice | `herdr notification show` |
-
-Worker Pi argv pins model. Reviewer Pi argv also loads packed `reviewer-result-tool.ts`, binds result path and nonce, and limits tools to `read,grep,find,ls,delivery_result_write`.
-
-### Runner and scheduler
-
-`extensions/delivery-runner.mjs` exports runtime from `extensions/lib/runner.mjs`. Runner:
-
-1. validates immutable approved contract;
-2. asks Herdr for exact approved worktree/path/pane;
-3. starts sole writer and sends prompt-file pointer;
-4. requires exclusive 0600 worker result file;
-5. captures Git evidence and rejects ownership violations;
-6. runs validation executable/argv without shell;
-7. freezes patch and candidate digest;
-8. starts fresh reviewer with scoped result tool;
-9. checks reviewer result, nonce path, candidate hash, and post-review drift;
-10. resumes retained writer for bounded accepted findings;
-11. writes handoff manifest only after clean review.
-
-Scheduler launches dependency-ready batches, caps concurrency, serializes durable state, pauses at `awaiting_integration`, verifies parent integration, and applies control inbox requests.
-
-### Result protocol
-
-Worker writes one package-prescribed result file. Reviewer cannot use generic write/edit/bash; `delivery_result_write` exclusively creates configured 0600 file after nonce match. Reviewer result binds frozen candidate SHA-256. Missing, malformed, duplicate, unbound, or drifted result blocks lane.
-
-## Authority
-
-Parent controls requirements, product/architecture decisions, finding disposition, approved tickets, integration, final acceptance, cleanup, and publication. Worker controls implementation inside approved ownership. Reviewer supplies evidence only.
-
-## Durability and recovery
-
-Run state lives under `.scratch/delivery/<run-id>/`. Prompt files, result pointers, validation logs, frozen patches, receipts, and manifests support inspection. Runner never infers completion from prose. Unknown process/agent identity, partial stop, missing result, or stale ownership blocks rather than spawning replacement.
-
-Detached entry persists exclusive runner ownership and reconciles before inbox processing or scheduling. Only proven-stale ownership can be claimed. Exact settled, identity-bound reviewed results may resume; live, unknown, incomplete, or ambiguous ownership/recovery blocks affected lanes without replacement agents or model fallback.
-
-Parent integrates completed batch and calls `delivery_continue` with exact SHA. Scheduler verifies clean checkout, base ancestry, exact content hashes or path-bound absence sentinels, and validation before next batch. Deleted paths pass only when absent at integrated commit; Git and object-type errors fail closed.
-
-## Limits
-
-- No automatic Herdr install/start/upgrade.
-- No live compatibility claim beyond `0.9.5` protocol `22` until manual fixture evidence exists.
-- No automatic worktree cleanup.
-- No automatic patch integration, merge, push, deploy, release, or publication.
-- No migration from legacy runtime state.
-- No model/provider/execution fallback.
+Worktrees isolate writers from each other, not from user OS. Package checks Git ownership; it does not claim filesystem sandboxing.

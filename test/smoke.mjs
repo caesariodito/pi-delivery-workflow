@@ -1,20 +1,7 @@
 import assert from "node:assert/strict";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
-import { createDeliveryWorkflowCore, REVIEWER_MODEL, WORKER_MODEL } from "../extensions/delivery-workflow-core.mjs";
+import { buildContextPacket, validateRunInput } from "../extensions/lib/scheduler.mjs";
 
-const root = fs.mkdtempSync(path.join(os.tmpdir(), "delivery-smoke-"));
-fs.mkdirSync(path.join(root, ".scratch"));
-fs.writeFileSync(path.join(root, ".scratch/context.md"), "context\n");
-fs.writeFileSync(path.join(root, ".scratch/plan.md"), "plan\n");
-const calls = [];
-const core = createDeliveryWorkflowCore({ random: () => "nonce", spawnProcess(executable, args, options) { calls.push({ executable, args, options }); return { pid: 7, unref() {} }; } });
-const review = await core.review(root, { runId: "run-1", kind: "plan", artifact: ".scratch/plan.md", contextBundle: ".scratch/context.md" });
-assert.equal(review.details.status, "launched");
-assert.equal(review.details.model, REVIEWER_MODEL);
-assert.deepEqual(review.details.tools, ["read", "grep", "find", "ls"]);
-assert.equal(calls[0].options.shell, false);
-assert.equal(calls[0].options.detached, true);
-assert.equal(WORKER_MODEL, "9router/cx/gpt-5.6-sol");
+const run = validateRunInput({ runId: "smoke", objective: "Smoke", baseSha: "a".repeat(40), tickets: [{ id: "T1", goal: "Do work", definitionOfDone: "Done", dependencies: [], ownedPaths: ["src/a.js"], worker: { name: "worker", kind: "pi", model: "model", thinking: "medium", tools: ["read", "write"] }, validation: { executable: "node", args: ["--test"] } }] });
+const packet = buildContextPacket({ run, ticket: run.tickets[0], repositoryPath: "/repo", worktreePath: "/work", promptPath: "/repo/.scratch/prompt.md", resultPath: "/repo/.scratch/result.json", nonce: "nonce" });
+assert.match(packet, /Delivery ticket T1/); assert.match(packet, /delivery_result_write/);
 console.log("delivery-workflow smoke: ok");

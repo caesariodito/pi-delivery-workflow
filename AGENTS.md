@@ -2,7 +2,7 @@
 
 ## Scope
 
-Pi package providing `/delivery`, trusted pi-subagents workflow resources, and delivery-workflow skill.
+Pi package providing `/delivery`, thin supervised Herdr ticket orchestration, and `delivery-workflow` skill.
 
 ## Commands
 
@@ -14,15 +14,15 @@ npm pack --dry-run
 
 ## Invariants
 
-- Parent retains requirements, decisions, synthesis, final acceptance, and publication authority.
-- Small linear tasks remain direct.
-- Reviewers use fresh context and stay read-only.
-- One writer per checkout/worktree.
-- Workflow arguments never become arbitrary shell commands.
-- Provider, workflow, and worktree failures fail closed.
+- Parent retains decisions, integration, cleanup, final acceptance, and publication authority.
+- Herdr owns visible worktrees, panes, and agent processes.
+- Package stays attached and persists inspection evidence only; no daemon or transparent crash recovery.
+- One writer per worktree; ownership cannot overlap.
+- Workflow input never becomes shell code.
+- Unknown or ambiguous external state blocks without replay or replacement.
 - No credentials or session transcripts in tests, docs, fixtures, or artifacts.
-- Keep implementation on public Pi and pi-subagents APIs.
+- Keep implementation on public Pi and Herdr APIs.
 
 ## Changes
 
-Use smallest coherent diff. Add focused smoke assertion for changed workflow behavior. Use Conventional Commits.
+Prefer deletion and smallest coherent diff. Add focused test for changed behavior. Use Conventional Commits.

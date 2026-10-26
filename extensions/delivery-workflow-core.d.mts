@@ -1,17 +1,9 @@
-export const REVIEWER_MODEL: string;
-export const WORKER_MODEL: string;
-
-export type ToolResult = { content: { type: "text"; text: string }[]; details: Readonly<Record<string, unknown>>; isError?: boolean };
-export type DeliveryWorkflowCore = Readonly<{
-  review(repositoryPath: string, input: Readonly<Record<string, any>>): Promise<ToolResult>;
-  start(repositoryPath: string, input: Readonly<Record<string, any>>): Promise<ToolResult>;
-  status(repositoryPath: string, input: Readonly<Record<string, any>>): Promise<ToolResult>;
-  steer(repositoryPath: string, input: Readonly<Record<string, any>>): Promise<ToolResult>;
-  reply(repositoryPath: string, input: Readonly<Record<string, any>>): Promise<ToolResult>;
-  continue(repositoryPath: string, input: Readonly<Record<string, any>>): Promise<ToolResult>;
-  stop(repositoryPath: string, input: Readonly<Record<string, any>>): Promise<ToolResult>;
+export const WORKER_MODEL: "9router/cx/gpt-5.6-sol";
+export type ToolResult = { content: Array<{ type: "text"; text: string }>; details: unknown; isError?: boolean };
+export function createDeliveryWorkflowCore(options?: Record<string, unknown>): Readonly<{
+  start(repositoryPath: string, input: Record<string, unknown>): Promise<ToolResult>;
+  status(repositoryPath: string, input: { runId: string }): Promise<ToolResult>;
+  steer(repositoryPath: string, input: { runId: string; ticketId: string; message: string }): Promise<ToolResult>;
+  continue(repositoryPath: string, input: { runId: string; integratedSha: string }): Promise<ToolResult>;
+  stop(repositoryPath: string, input: { runId: string; ticketId?: string }): Promise<ToolResult>;
 }>;
-export function createDeliveryWorkflowCore(options?: Readonly<Record<string, any>>): DeliveryWorkflowCore;
-export function contractDigest(value: unknown): string;
-export function runStandaloneReview(requestPath: string, options?: Readonly<Record<string, any>>): Promise<void>;
-export function runDetachedDelivery(runtimeDir: string, options?: Readonly<Record<string, any>>): Promise<Readonly<Record<string, any>>>;

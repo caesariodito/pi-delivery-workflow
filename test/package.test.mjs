@@ -41,7 +41,7 @@ test("package has no legacy dependency or runtime imports", () => {
   }
 });
 
-test("packed package contains Herdr runner, scoped result tool, runtime modules, and skill", () => {
+test("packed package contains thin Herdr workflow, scoped result tool, scheduler, and skill", () => {
   const pack = JSON.parse(execFileSync("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"], { cwd: root, encoding: "utf8" }));
   const files = new Set(pack[0].files.map(({ path: file }) => file));
   for (const target of manifest.pi.extensions) {
@@ -52,15 +52,10 @@ test("packed package contains Herdr runner, scoped result tool, runtime modules,
     for (const expected of targetContents(target)) assert.ok(files.has(expected), `packed package missing pi.skills content ${expected}`);
   }
   for (const expected of [
-    "extensions/delivery-runner.mjs",
     "extensions/reviewer-result-tool.ts",
     "extensions/delivery-workflow-core.mjs",
-    "extensions/lib/contracts.mjs",
-    "extensions/lib/git-evidence.mjs",
     "extensions/lib/herdr.mjs",
-    "extensions/lib/runner.mjs",
     "extensions/lib/scheduler.mjs",
-    "extensions/lib/state.mjs",
     "skills/delivery-workflow/SKILL.md",
   ]) assert.ok(files.has(expected), `packed package missing ${expected}`);
 });
