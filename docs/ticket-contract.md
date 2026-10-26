@@ -82,4 +82,4 @@ Ticket valid when goal is one testable outcome, concurrent ownership/worktrees d
 | `stopped` | Recorded worker settled; reviewer inactivity unproven | Verify all worker/reviewer targets and panes, ownership, and clean worktree before manual cleanup |
 | `stop_unconfirmed` | Recorded worker stop not proven | Confirm ownership; retain worktree |
 
-`done` never comes from prose. Required evidence includes candidate hash, frozen patch, path hashes, validation log, scoped review result, and handoff manifest. Current continuation cannot verify deleted paths; any deletion candidate must remain blocked and unintegrated pending deletion support.
+`done` never comes from prose. Required evidence includes candidate hash, frozen patch, path hashes, validation log, scoped review result, and handoff manifest. Deleted paths use path-bound absence sentinels and pass continuation only when exact path is absent at integrated commit.

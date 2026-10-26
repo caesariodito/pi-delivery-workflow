@@ -92,13 +92,13 @@ One writer owns each worktree. Never launch replacement while ownership uncertai
 
 ## 7. Integrate and continue
 
-When status is `awaiting_integration`, inspect ticket state, result pointers, validation logs, frozen patches, review result/candidate hash, and handoff manifests. If any path is deleted, do not integrate or continue: current integration verifier expects `git show` content for every changed path and rejects deletions. Preserve evidence, mark lane blocked, and escalate; deletion support is pending. Otherwise integrate only reviewed `done` lanes into clean parent checkout. Commit integration, rerun required checks as needed, then call:
+When status is `awaiting_integration`, inspect ticket state, result pointers, validation logs, frozen patches, review result/candidate hash, and handoff manifests. Integrate only reviewed `done` lanes into clean parent checkout. Deleted paths are supported through path-bound absence sentinels and must be absent at integrated commit. Commit integration, rerun required checks as needed, then call:
 
 ```json
 { "runId": "<run-id>", "integratedSha": "<integrated sha>" }
 ```
 
-through `delivery_continue`. Runtime verifies clean checkout, ancestry, exact path hashes, and configured validation before next batch/final state. Failed verification blocks.
+through `delivery_continue`. Runtime verifies clean checkout, ancestry, exact content hashes or deletion sentinels, and configured validation before next batch/final state. Git errors, object-type mismatches, and content/deletion mismatches fail closed.
 
 ## 8. Supervise, recover, stop
 
@@ -111,7 +111,7 @@ Use tools or same-name JSON commands:
 
 Do not instruct operators to use `delivery_reply` until question persistence exists. Resolve blocked decisions outside this control API. No sleep/poll loops.
 
-No automatic crash restart/reconciliation is wired through detached entry. After interruption, first establish runner process still exists. Missing/dead runner may leave phase `active` and inbox unconsumed. Treat it as blocked: send no controls, do not integrate or continue, preserve all state/prompts/results/receipts/patches/handoffs/worktrees and recorded Herdr identities, then escalate. Never use fallback or replacement writer. Exact-settled identity-bound recovery exists only as unit-tested internal seam and is not exposed by detached runtime.
+Detached startup claims exclusive runner ownership and reconciles durable state before inbox processing or scheduling. Recovery uses only exact retained Herdr identity and candidate evidence; it never launches replacement worker/reviewer or model fallback. Exact settled reviewed results resume safely. Live, unknown, incomplete, ambiguous, or unavailable recovery blocks affected lanes and preserves evidence. Manual inspection and worktree cleanup remain operator duties.
 
 `stopped` proves only recorded worker settled, not reviewer inactivity. `stop_unconfirmed` requires manual confirmation; never clean up or replace writer.
 

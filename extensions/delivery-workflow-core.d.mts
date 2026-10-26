@@ -13,3 +13,4 @@ export type DeliveryWorkflowCore = Readonly<{
 }>;
 export function createDeliveryWorkflowCore(options?: Readonly<Record<string, any>>): DeliveryWorkflowCore;
 export function runStandaloneReview(requestPath: string, options?: Readonly<Record<string, any>>): Promise<void>;
+export function runDetachedDelivery(runtimeDir: string, options?: Readonly<Record<string, any>>): Promise<Readonly<Record<string, any>>>;

@@ -39,34 +39,24 @@ Tool calls use objects; command wrappers accept JSON.
 /delivery_stop {"runId":"refresh-token"}
 ```
 
-`delivery_steer` targets exact active worker. `delivery_reply` remains registered but is reserved: current runtime does not persist `ticket.question`, so normal blocked-decision replies are rejected. Resolve such decisions outside this control API; current detached runtime exposes no operator recovery/resume path after runner death. Stop sends `C-c` only to recorded worker and waits for that worker to settle; it neither stops nor proves inactivity of reviewer targets. `stop_unconfirmed` requires manual inspection.
+`delivery_steer` targets exact active worker. `delivery_reply` remains registered but is reserved: current runtime does not persist `ticket.question`, so normal blocked-decision replies are rejected. Resolve such decisions outside this control API. Stop sends `C-c` only to recorded worker and waits for that worker to settle; it neither stops nor proves inactivity of reviewer targets. `stop_unconfirmed` requires manual inspection.
 
 ## Integrate and continue
 
 Completed batch pauses at `awaiting_integration`. Parent:
 
 1. inspect ticket state, validation log, reviewer result, frozen patch, and handoff;
-2. if any changed path is deleted, stop: do not integrate or continue; preserve evidence and escalate because deletion support is pending;
-3. integrate only reviewed `done` candidates without deletions;
-4. commit integration on clean parent checkout;
-5. call `/delivery_continue {"runId":"refresh-token","integratedSha":"<sha>"}`;
-6. let runtime verify ancestry, path hashes, and configured validation;
-7. start/observe next ready batch or final acceptance.
+2. integrate only reviewed `done` candidates, including reviewed deletions;
+3. commit integration on clean parent checkout;
+4. call `/delivery_continue {"runId":"refresh-token","integratedSha":"<sha>"}`;
+5. let runtime verify ancestry, exact content hashes or deletion sentinels, and configured validation;
+6. start/observe next ready batch or final acceptance.
 
-Current verifier expects `git show` content for every changed path, so deletion integration is rejected. Failed verification leaves lane blocked. Do not claim done from child prose.
+Deleted paths pass only when exact path is absent at integrated commit. Git errors, unexpected object types, and content/deletion mismatches fail closed. Do not claim done from child prose.
 
 ## Recovery
 
-After Pi interruption, first establish detached runner still exists before using status/control as live operations. If runner is missing or died, state may remain `active` and inbox will remain unconsumed. Treat run as blocked:
-
-1. do not send `delivery_steer`, `delivery_reply`, `delivery_stop`, or `delivery_continue`;
-2. do not integrate candidate;
-3. preserve state, config, prompts, results, receipts, patches, handoffs, worktrees, and Herdr identity evidence;
-4. inspect recorded worker and reviewer targets without changing them;
-5. escalate missing-runner condition;
-6. do not start fallback or replacement writer.
-
-No automatic crash restart/reconciliation is wired into detached entry. Exact-settled recovery exists only as unit-tested internal runner/scheduler seam and is not exposed to operator. Do not hand-edit state to manufacture progress.
+After restart, detached entry claims runner ownership only when no live/unknown owner exists, then reconciles before consuming controls or scheduling. Recovery queries exact retained Herdr identity and accepts only settled, schema-valid, candidate-bound evidence. Exact reviewed completion resumes without launching replacement worker/reviewer or model fallback. Incomplete, ambiguous, unavailable, or non-settled recovery blocks affected lanes and preserves state, prompts, results, receipts, patches, handoffs, worktrees, and identity evidence. Inspect blocked state and escalate; do not hand-edit state to manufacture progress.
 
 ## Manual cleanup
 

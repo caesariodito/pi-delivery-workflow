@@ -43,9 +43,10 @@ export type RecoveryResult = Readonly<{
   target: string;
   kind: "worker" | "review";
   result: Readonly<Record<string, unknown>>;
-}> | Extract<TicketResult, { status: "blocked" }>;
+}> | TicketResult;
 
 export const RESULT_PROTOCOL: "result-file-pointer";
+export function absentPathHash(file: string): string;
 export const REVIEW_TOOLS: readonly ["read", "grep", "find", "ls"];
 export function validateTicketRunContract(value: unknown): TicketRunContract;
 export function createProcessRunner(options?: { timeoutMs?: number; maxOutputBytes?: number }): ProcessRunner;
@@ -55,7 +56,10 @@ export function createDeliveryRunner(options: {
   clock?: () => Date;
   random?: () => string | number;
   notifier?: (message: { title: string; body: string; sound: "done" }) => void | Promise<void>;
+  beforeManifestPublish?: (input: { manifest: HandoffManifest; manifestPath: string }) => void | Promise<void>;
+  beforeManifestOpen?: (input: { filePath: string; label: string }) => void;
+  afterManifestCreate?: (input: { manifestPath: string; bytes: Buffer }) => void;
 }): Readonly<{
   runTicket(input: unknown): Promise<TicketResult>;
-  recoverSettledResult(input: unknown, identity?: { expectedTarget?: string; expectedKind?: "worker" | "review"; expectedCandidateHash?: string }): Promise<RecoveryResult>;
+  recoverSettledResult(input: unknown, identity?: { expectedTarget?: string; expectedKind?: "worker" | "review"; expectedCandidateHash?: string; finalizeDone?: boolean; beforeManifestPublish?: () => void | Promise<void> }): Promise<RecoveryResult>;
 }>;

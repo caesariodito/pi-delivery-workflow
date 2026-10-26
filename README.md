@@ -97,13 +97,13 @@ ready → active → review → needs_fix → active → done
 batch done → awaiting_integration → delivery_continue → next batch/final acceptance
 ```
 
-Parent integrates only reviewed `done` handoffs, commits integration, then calls `delivery_continue` with integrated SHA. Runtime verifies clean checkout, ancestry, exact path hashes, and validation before releasing dependent batch. Current integration verification cannot accept deleted paths because it expects `git show <sha>:<path>` content. If a handoff deletes any path, do not integrate or call `delivery_continue`; leave run blocked, preserve evidence, and escalate. Deletion support is pending.
+Parent integrates only reviewed `done` handoffs, commits integration, then calls `delivery_continue` with integrated SHA. Runtime verifies clean checkout, ancestry, exact content hashes or deletion sentinels, and validation before releasing dependent batch. Deleted paths pass only when exact path is absent at integrated commit; Git errors, unexpected objects, and content/deletion mismatches fail closed.
 
 ## Supervision and recovery
 
 Use `delivery_status` for current phase and next action. Use `delivery_steer` only for bounded guidance to exact active ticket. `delivery_reply` remains registered for future question persistence, but current runtime never records `ticket.question`; normal blocked-decision replies are rejected. Do not instruct operators to use it. `delivery_stop` interrupts only recorded worker and waits for that worker to settle; it does not stop or prove inactivity of any reviewer. `stop_unconfirmed` requires manual inspection.
 
-Pi reload does not restart or reconcile a dead detached runner. If runner is missing or has died, state may remain `active` and control inbox requests will not be consumed. Treat run as blocked: do not send controls, integrate, or call `delivery_continue`; preserve state, receipts, Herdr agent/worktree evidence, patches, and handoffs, then escalate. Never launch fallback or replacement writer while ownership remains uncertain. Exact-settled recovery logic exists only as an internal unit-tested seam and is not wired into detached entry.
+Detached startup exclusively claims runner ownership, reconciles durable state against exact retained Herdr identities, then processes inbox or schedules work. Exact settled reviewed results can resume; no replacement worker/reviewer or model fallback is launched. Live, unknown, incomplete, ambiguous, or unavailable recovery fails closed and retains evidence. Manual inspection remains required for blocked recovery and stale worktree cleanup.
 
 Herdr worktrees are retained. Cleanup is always manual after acceptance or abandonment:
 

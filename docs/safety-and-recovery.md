@@ -28,20 +28,18 @@ Worker completion requires exclusive 0600 result file. Reviewers receive only re
 - `stopped`: recorded worker settled only; reviewer inactivity and cleanup safety remain unproven.
 - blocked decision reply: `delivery_reply` is currently unavailable because runtime does not persist `ticket.question`; reserved API rejects normal replies.
 - integration verification failure: preserve `awaiting_integration` evidence and correct parent integration.
-- deleted path: current continuation verifier expects file content, so do not integrate or continue; block and escalate pending deletion support.
-- missing/dead detached runner: state may remain active and inbox unconsumed; send no controls, do not integrate, preserve evidence, and escalate without fallback/replacement.
+- deleted path: continuation accepts only path-bound absence sentinel when exact path is absent at integrated commit; mismatches and Git errors block.
+- missing/dead detached runner: replacement entry reconciles exact durable ownership and retained Herdr identity before inbox or scheduling; ambiguity blocks without fallback/replacement.
 - legacy state: unsupported and read-only.
 
 ## Recovery sequence
 
-1. Establish whether detached runner process still exists before sending any control.
-2. If runner is missing or dead, treat run as blocked even when durable phase says `active`.
-3. Send no controls, do not integrate, and do not call `delivery_continue`; inbox has no consumer.
-4. Preserve runner config/state, prompt/result pointers, receipts, patches, validation logs, reviews, handoffs, exact Herdr identities, and worktrees.
-5. Inspect recorded agents/worktrees read-only and escalate.
-6. Never start fallback or replacement writer while ownership or effects remain uncertain.
-
-Automatic crash restart/reconciliation is not wired into detached entry. Exact-settled nonce-bound recovery is implemented and unit-tested only as internal runner/scheduler seam; operator cannot invoke it through current tools. Do not imply or manufacture recovery by editing state.
+1. Detached entry checks durable lock and runner evidence before inbox or scheduling.
+2. Only proven-stale ownership can be taken over; live or unknown owners are not overwritten.
+3. Recovery queries exact retained Herdr target and accepts only settled, schema-valid, candidate-bound result evidence.
+4. Exact reviewed completion resumes scheduling; no replacement worker/reviewer or model fallback is launched.
+5. Incomplete, ambiguous, unavailable, or non-settled recovery atomically blocks affected lanes and preserves evidence.
+6. Inspect blocked agents/worktrees read-only and perform cleanup manually; never hand-edit state to manufacture progress.
 
 ## Stop and cleanup
 

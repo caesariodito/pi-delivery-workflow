@@ -83,17 +83,17 @@ Use steer for bounded guidance. `delivery_reply` is reserved but currently rejec
 
 ## 8. Integrate and continue
 
-At `awaiting_integration`, parent inspects result files, validation, review, patch, path hashes, and handoff. If any changed path is deleted, do not integrate or continue: current verifier expects content for every path and rejects deletions. Preserve evidence and escalate; deletion support is pending. Otherwise integrate reviewed `done` lanes, commit clean parent checkout, then:
+At `awaiting_integration`, parent inspects result files, validation, review, patch, path hashes, and handoff. Integrate reviewed `done` lanes, including reviewed deletions, commit clean parent checkout, then:
 
 ```text
 /delivery_continue {"runId":"key-rotation","integratedSha":"<40-or-64-hex-sha>"}
 ```
 
-Runtime verifies clean checkout, ancestry, exact integrated path hashes, and validation before dependent batch. Repeat until final state, then parent performs final acceptance. Merge, push, deploy, release, and publication remain separately authorized.
+Runtime verifies clean checkout, ancestry, exact integrated content hashes or deletion sentinels, and validation before dependent batch. Deleted paths pass only when exact path is absent; Git, type, and hash mismatches fail closed. Repeat until final state, then parent performs final acceptance. Merge, push, deploy, release, and publication remain separately authorized.
 
 ## 9. Recover and clean up
 
-After interruption, establish detached runner still exists. No automatic restart/reconciliation is wired. Missing/dead runner can leave active state and unconsumed inbox; treat it as blocked, send no controls, do not integrate, preserve every artifact/worktree/agent identity, and escalate without fallback or replacement. Exact-settled recovery is only an internal unit-tested seam, not an operator feature.
+After interruption, detached entry verifies exclusive ownership and reconciles exact retained Herdr identity before inbox or scheduling. Exact settled reviewed results resume without replacement agents or model fallback. Live, unknown, incomplete, ambiguous, unavailable, or non-settled recovery blocks affected lanes and preserves every artifact, worktree, and identity for inspection.
 
 After acceptance or abandonment, manually verify recorded worker and every reviewer target and pane inactive, inspect ownership evidence, and require clean worktree state before removing worktrees and later runtime evidence. Preserve and reconcile dirty changes. No automatic cleanup.
 

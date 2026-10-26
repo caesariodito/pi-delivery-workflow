@@ -16,6 +16,10 @@ const REVIEW_EXTENSION = fileURLToPath(new URL("../reviewer-result-tool.ts", imp
 const RESULT_PROTOCOL = "result-file-pointer";
 const REVIEW_VERDICTS = new Set(["ok", "needs_fix", "blocked"]);
 
+export function absentPathHash(file) {
+  return sha256(`absent\0${validateRelativePath(file, { allowDirectoryPrefix: false })}`);
+}
+
 function plain(value, label) {
   if (!value || typeof value !== "object" || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) throw new TypeError(`${label} must be a plain object.`);
   return value;
@@ -142,17 +146,38 @@ function exclusiveWrite(filePath, contents) {
   return sha256(bytes);
 }
 
-function safeFile(root, filePath, label) {
-  const resolvedRoot = fs.realpathSync(root);
-  const stat = fs.lstatSync(filePath);
-  const real = fs.realpathSync(filePath);
-  const relative = path.relative(resolvedRoot, real);
-  if (!stat.isFile() || stat.isSymbolicLink() || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error(`${label} must be a regular non-linked file inside run directory.`);
-  if ((stat.mode & 0o077) !== 0) throw new Error(`${label} permissions must be 0600.`);
-  if (stat.size > MAX_TEXT) throw new Error(`${label} exceeds ${MAX_TEXT} bytes.`);
-  const flags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0);
-  const fd = fs.openSync(real, flags);
-  try { return fs.readFileSync(fd); } finally { fs.closeSync(fd); }
+function safeFile(root, filePath, label, beforeOpen) {
+  const resolvedRoot = path.resolve(root);
+  if (typeof filePath !== "string" || !path.isAbsolute(filePath) || path.normalize(filePath) !== filePath) throw new Error(`${label} path must be normalized and absolute.`);
+  const relative = path.relative(resolvedRoot, filePath);
+  if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error(`${label} must be inside run directory.`);
+  if (fs.constants.O_NOFOLLOW === undefined) throw new Error(`${label} requires O_NOFOLLOW support.`);
+  if (beforeOpen) beforeOpen({ filePath, label });
+  const fd = fs.openSync(filePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  try {
+    const stat = fs.fstatSync(fd);
+    const identity = fs.lstatSync(filePath);
+    if (!stat.isFile() || stat.nlink !== 1 || identity.isSymbolicLink() || identity.dev !== stat.dev || identity.ino !== stat.ino) throw new Error(`${label} must be a regular singly-linked stable file.`);
+    if ((stat.mode & 0o777) !== 0o600) throw new Error(`${label} permissions must be 0600.`);
+    if (!Number.isSafeInteger(stat.size) || stat.size < 0 || stat.size > MAX_TEXT) throw new Error(`${label} exceeds ${MAX_TEXT} bytes.`);
+    const bytes = Buffer.alloc(stat.size); let offset = 0;
+    while (offset < bytes.length) { const count = fs.readSync(fd, bytes, offset, bytes.length - offset, offset); if (count === 0) throw new Error(`${label} changed while reading.`); offset += count; }
+    const extra = Buffer.alloc(1); if (fs.readSync(fd, extra, 0, 1, offset) !== 0) throw new Error(`${label} changed while reading.`);
+    return bytes;
+  } finally { fs.closeSync(fd); }
+}
+
+function publishManifest(runDirectory, manifestPath, manifest, { beforeOpen, afterCreate } = {}) {
+  const normalized = createHandoffManifest(manifest);
+  const bytes = Buffer.from(`${JSON.stringify(normalized)}\n`, "utf8");
+  let created = false;
+  try { exclusiveWrite(manifestPath, bytes); created = true; } catch (error) { if (error.code !== "EEXIST") throw error; }
+  if (created && afterCreate) afterCreate({ manifestPath, bytes });
+  const publishedBytes = safeFile(runDirectory, manifestPath, "handoff manifest", beforeOpen);
+  let published;
+  try { published = createHandoffManifest(JSON.parse(publishedBytes.toString("utf8"))); } catch (cause) { throw new Error("handoff manifest is malformed or conflicting.", { cause }); }
+  if (!publishedBytes.equals(bytes) || JSON.stringify(published) !== JSON.stringify(normalized)) throw new Error("handoff manifest is malformed or conflicting.");
+  return Object.freeze({ manifest: published, bytes: publishedBytes, sha256: sha256(publishedBytes) });
 }
 
 function requireAbsent(filePath, label) {
@@ -230,7 +255,7 @@ async function captureGit(processRunner, contract) {
     let stat;
     try { stat = fs.lstatSync(file); } catch (error) { if (error.code !== "ENOENT") throw error; }
     if (stat?.isSymbolicLink()) throw new Error(`changed path must not be a symlink: ${changed}`);
-    pathHashes[changed] = stat?.isFile() ? sha256(fs.readFileSync(file)) : sha256(`absent\0${changed}`);
+    pathHashes[changed] = stat?.isFile() ? sha256(fs.readFileSync(file)) : absentPathHash(changed);
   }
   const candidateHash = sha256(JSON.stringify({ headSha, branch, patch: fullPatch.toString("base64"), pathHashes }));
   return Object.freeze({ headSha, branch, status, patch: fullPatch, entries, changedPaths, pathHashes: Object.freeze(pathHashes), candidateHash });
@@ -275,10 +300,10 @@ function protocol(herdr) {
   if (selected !== RESULT_PROTOCOL) throw new Error(`unsupported Herdr extraction protocol: ${String(selected)}.`);
 }
 
-export function createDeliveryRunner({ herdr, processRunner = createProcessRunner(), clock = () => new Date(), random = () => Math.random().toString(16).slice(2), notifier = async () => {} } = {}) {
+export function createDeliveryRunner({ herdr, processRunner = createProcessRunner(), clock = () => new Date(), random = () => Math.random().toString(16).slice(2), notifier = async () => {}, beforeManifestPublish = async () => {}, beforeManifestOpen, afterManifestCreate } = {}) {
   if (!herdr || typeof herdr !== "object") throw new TypeError("herdr adapter is required.");
   if (!processRunner || typeof processRunner.run !== "function") throw new TypeError("processRunner.run is required.");
-  if (typeof clock !== "function" || typeof random !== "function" || typeof notifier !== "function") throw new TypeError("clock, random, and notifier must be functions.");
+  if (typeof clock !== "function" || typeof random !== "function" || typeof notifier !== "function" || typeof beforeManifestPublish !== "function" || (beforeManifestOpen !== undefined && typeof beforeManifestOpen !== "function") || (afterManifestCreate !== undefined && typeof afterManifestCreate !== "function")) throw new TypeError("runner hooks must be functions.");
 
   async function runTicket(input) {
     const contract = validateTicketRunContract(input);
@@ -316,7 +341,7 @@ export function createDeliveryRunner({ herdr, processRunner = createProcessRunne
         validationLogPath = path.join(runDirectory, `validation-${round}.log`);
         const gate = await processRunner.run({ ...contract.validation, cwd: contract.validation.cwd ? path.join(contract.worktreePath, contract.validation.cwd) : contract.worktreePath });
         const gateLog = Buffer.concat([Buffer.from(gate.stdout ?? ""), Buffer.from(gate.stderr ?? "")]);
-        exclusiveWrite(validationLogPath, gateLog);
+        const validationLogSha256 = exclusiveWrite(validationLogPath, gateLog);
         if (gate.code !== 0 || gate.signal || gate.timedOut || gate.outputLimit) return finishBlocked("validation failed", { exitCode: gate.code, signal: gate.signal ?? null, timedOut: gate.timedOut === true, outputLimit: gate.outputLimit === true, validationLog: validationLogPath });
         const postGate = await captureGit(processRunner, contract);
         if (postGate.candidateHash !== preGate.candidateHash) return finishBlocked("candidate drifted during validation", { expected: preGate.candidateHash, actual: postGate.candidateHash, validationLog: validationLogPath });
@@ -331,7 +356,7 @@ export function createDeliveryRunner({ herdr, processRunner = createProcessRunne
         requireAbsent(reviewerResultPath, "review result");
         const reviewPrompt = reviewerPrompt(contract, candidate, reviewerResultPath, reviewerNonce, patchPath, patchSha256, validationLogPath);
         const reviewPromptSha256 = exclusiveWrite(reviewerPromptPath, reviewPrompt);
-        writeState({ phase: "review_waiting", round, target: reviewerTarget, resultPath: reviewerResultPath, promptPath: reviewerPromptPath, promptSha256: reviewPromptSha256, candidateHash: candidate.candidateHash });
+        writeState({ phase: "review_waiting", round, target: reviewerTarget, resultPath: reviewerResultPath, promptPath: reviewerPromptPath, promptSha256: reviewPromptSha256, candidateHash: candidate.candidateHash, patchPath, patchSha256, validationLogPath, validationLogSha256 });
         await herdr.agentStart({ name: reviewerTarget, kind: contract.reviewer.kind, pane: contract.reviewer.pane, timeout: contract.agentTimeoutMs, agentArgs: ["--model", contract.reviewer.model, "--extension", REVIEW_EXTENSION, "--delivery-result-path", reviewerResultPath, "--delivery-result-nonce", reviewerNonce, "--tools", [...REVIEW_TOOLS, REVIEW_RESULT_TOOL].join(",")] });
         await herdr.agentPrompt({ target: reviewerTarget, prompt: `Read prompt file ${reviewerPromptPath} (SHA-256 ${reviewPromptSha256}) and follow it exactly.`, wait: true, until: ["done", "blocked"], timeout: contract.agentTimeoutMs });
         const review = readResult(runDirectory, reviewerResultPath, "review");
@@ -356,9 +381,18 @@ export function createDeliveryRunner({ herdr, processRunner = createProcessRunne
             agent: { name: workerTarget, paneId: contract.worker.pane, kind: contract.worker.kind, session: contract.worker.session },
           });
           const manifestPath = path.join(runDirectory, "handoff.json");
-          atomicWriteJson(manifestPath, manifest);
-          const result = Object.freeze({ ticketId: contract.ticketId, status: "done", candidateHash: candidate.candidateHash, manifest, manifestPath });
-          writeState({ phase: "done", round, candidateHash: candidate.candidateHash, manifestPath });
+          let published;
+          try {
+            await beforeManifestPublish({ manifest, manifestPath });
+            const finalCandidate = await captureGit(processRunner, contract);
+            const finalReview = readResult(runDirectory, reviewerResultPath, "review");
+            const finalPatch = safeFile(runDirectory, patchPath, "candidate patch");
+            const finalValidation = safeFile(runDirectory, validationLogPath, "validation log");
+            if (finalCandidate.candidateHash !== candidate.candidateHash || finalReview.sha256 !== review.sha256 || finalReview.candidateHash !== candidate.candidateHash || !finalPatch.equals(candidate.patch) || sha256(finalPatch) !== patchSha256 || sha256(finalValidation) !== validationLogSha256) throw new Error("completion evidence changed before manifest publication.");
+            published = publishManifest(runDirectory, manifestPath, manifest, { beforeOpen: beforeManifestOpen, afterCreate: afterManifestCreate });
+          } catch (error) { return finishBlocked(error instanceof Error ? error.message : String(error)); }
+          const result = Object.freeze({ ticketId: contract.ticketId, status: "done", candidateHash: candidate.candidateHash, manifest: published.manifest, manifestPath });
+          writeState({ phase: "done", round, target: reviewerTarget, resultPath: reviewerResultPath, resultSha256: review.sha256, candidateHash: candidate.candidateHash, patchPath, patchSha256, validationLogPath, validationLogSha256, manifestPath, manifestSha256: published.sha256 });
           await notifier({ title: `${contract.ticketId} done`, body: manifestPath, sound: "done" });
           return result;
         }
@@ -373,7 +407,7 @@ export function createDeliveryRunner({ herdr, processRunner = createProcessRunne
     }
   }
 
-  async function recoverSettledResult(input, { expectedTarget, expectedKind, expectedCandidateHash } = {}) {
+  async function recoverSettledResult(input, { expectedTarget, expectedKind, expectedCandidateHash, finalizeDone = false, beforeManifestPublish } = {}) {
     const contract = validateTicketRunContract(input);
     const runDirectory = path.join(contract.repositoryPath, ".scratch", "delivery", contract.runId, contract.ticketId);
     const statePath = path.join(runDirectory, "state.json");
@@ -382,24 +416,79 @@ export function createDeliveryRunner({ herdr, processRunner = createProcessRunne
       atomicWriteJson(statePath, { version: 1, runId: contract.runId, ticketId: contract.ticketId, updatedAt: clock().toISOString(), phase: "blocked", reason });
       return blocked(contract, reason, evidence);
     };
-    try { protocol(herdr); } catch (error) { stop(error instanceof Error ? error.message : String(error)); throw error; }
     let state;
     try { state = readJson(statePath); } catch { return stop("recovery state is missing or ambiguous"); }
-    if (!state || state.version !== 1 || state.runId !== contract.runId || state.ticketId !== contract.ticketId || !["worker_waiting", "review_waiting"].includes(state.phase) || typeof state.target !== "string" || typeof state.resultPath !== "string" || typeof state.promptPath !== "string" || !/^[0-9a-f]{64}$/.test(state.promptSha256 ?? "")) return stop("recovery state is ambiguous");
-    let promptBytes;
-    try { promptBytes = safeFile(runDirectory, state.promptPath, "recovery prompt"); } catch { return stop("recovery prompt is missing or ambiguous"); }
-    if (sha256(promptBytes) !== state.promptSha256) return stop("recovery prompt digest is ambiguous");
-    if ((expectedTarget && state.target !== expectedTarget) || (expectedKind && state.phase !== `${expectedKind}_waiting`) || (expectedCandidateHash && state.candidateHash !== expectedCandidateHash)) return stop("recovery identity is ambiguous");
-    let agentState;
-    try { agentState = await herdr.agentGet(state.target); } catch (error) { stop(error instanceof Error ? error.message : String(error)); throw error; }
-    const settled = agentState?.agent?.status ?? agentState?.agent?.state ?? agentState?.status ?? agentState?.state;
-    if (!["done", "blocked", "idle"].includes(settled)) return stop("recovery agent is not settled", { target: state.target, agentState });
+    const originalDone = state?.phase === "done";
+    const reject = (reason, evidence = {}) => originalDone ? blocked(contract, reason, evidence) : stop(reason, evidence);
+    try { protocol(herdr); } catch (error) { if (originalDone) return reject(error instanceof Error ? error.message : String(error)); stop(error instanceof Error ? error.message : String(error)); throw error; }
+    if (!state || state.version !== 1 || state.runId !== contract.runId || state.ticketId !== contract.ticketId || !["worker_waiting", "review_waiting", "done"].includes(state.phase) || typeof state.target !== "string" || typeof state.resultPath !== "string") return reject("recovery state is ambiguous");
     const kind = state.phase === "worker_waiting" ? "worker" : "review";
+    if (state.phase !== "done") {
+      if (typeof state.promptPath !== "string" || !/^[0-9a-f]{64}$/.test(state.promptSha256 ?? "")) return reject("recovery state is ambiguous");
+      let promptBytes;
+      try { promptBytes = safeFile(runDirectory, state.promptPath, "recovery prompt"); } catch { return reject("recovery prompt is missing or ambiguous"); }
+      if (sha256(promptBytes) !== state.promptSha256) return reject("recovery prompt digest is ambiguous");
+    }
+    if ((expectedTarget && state.target !== expectedTarget) || (expectedKind && kind !== expectedKind) || (expectedCandidateHash && state.candidateHash !== expectedCandidateHash)) return reject("recovery identity is ambiguous");
+    if (state.phase !== "done") {
+      let agentState;
+      try { agentState = await herdr.agentGet(state.target); } catch (error) { stop(error instanceof Error ? error.message : String(error)); throw error; }
+      const settled = agentState?.agent?.status ?? agentState?.agent?.state ?? agentState?.status ?? agentState?.state;
+      if (!["done", "blocked", "idle"].includes(settled)) return reject("recovery agent is not settled", { target: state.target, agentState });
+    }
     let result;
-    try { result = readResult(runDirectory, state.resultPath, kind); } catch { return stop("recovery result is missing or ambiguous", { target: state.target }); }
-    if (kind === "review" && (typeof state.candidateHash !== "string" || result.candidateHash !== state.candidateHash)) return stop("recovery candidate hash is ambiguous", { target: state.target });
-    atomicWriteJson(statePath, { version: 1, runId: contract.runId, ticketId: contract.ticketId, updatedAt: clock().toISOString(), phase: "recovered", target: state.target, kind, resultSha256: result.sha256, ...(state.candidateHash ? { candidateHash: state.candidateHash } : {}) });
-    return Object.freeze({ ticketId: contract.ticketId, status: "recovered", target: state.target, kind, result });
+    try { result = readResult(runDirectory, state.resultPath, kind); } catch { return reject("recovery result is missing or ambiguous", { target: state.target }); }
+    if (kind === "review" && (typeof state.candidateHash !== "string" || result.candidateHash !== state.candidateHash)) return reject("recovery candidate hash is ambiguous", { target: state.target });
+    if (state.phase === "done" && result.sha256 !== state.resultSha256) return reject("recovery review result digest is ambiguous", { target: state.target });
+    if (!finalizeDone && state.phase !== "done") {
+      atomicWriteJson(statePath, { version: 1, runId: contract.runId, ticketId: contract.ticketId, updatedAt: clock().toISOString(), phase: "recovered", target: state.target, kind, resultSha256: result.sha256, ...(state.candidateHash ? { candidateHash: state.candidateHash } : {}) });
+      return Object.freeze({ ticketId: contract.ticketId, status: "recovered", target: state.target, kind, result });
+    }
+    if (kind === "review" && result.verdict === "ok") {
+      let candidate;
+      try { candidate = await captureGit(processRunner, contract); } catch { return reject("recovery candidate Git evidence is ambiguous", { target: state.target }); }
+      if (candidate.candidateHash !== state.candidateHash) return reject("recovery candidate hash is ambiguous", { target: state.target });
+      if (!Number.isSafeInteger(state.round) || state.round < 0) return reject("recovery evidence paths are ambiguous", { target: state.target });
+      const expectedPatchPath = path.join(runDirectory, `candidate-${state.round}.patch`);
+      const expectedValidationLogPath = path.join(runDirectory, `validation-${state.round}.log`);
+      if (state.patchPath !== expectedPatchPath || state.validationLogPath !== expectedValidationLogPath || !/^[0-9a-f]{64}$/.test(state.patchSha256 ?? "") || !/^[0-9a-f]{64}$/.test(state.validationLogSha256 ?? "")) return reject("recovery evidence paths or digests are ambiguous", { target: state.target });
+      const patchPath = state.patchPath; const validationLogPath = state.validationLogPath;
+      let patchBytes; let validationLogBytes;
+      try { patchBytes = safeFile(runDirectory, patchPath, "recovery patch"); validationLogBytes = safeFile(runDirectory, validationLogPath, "recovery validation log"); } catch { return reject("recovery evidence is missing or ambiguous", { target: state.target }); }
+      const patchSha256 = sha256(patchBytes); const validationLogSha256 = sha256(validationLogBytes);
+      if (!patchBytes.equals(candidate.patch) || patchSha256 !== state.patchSha256) return reject("recovery patch is missing or ambiguous", { target: state.target });
+      if (validationLogSha256 !== state.validationLogSha256) return reject("recovery validation evidence is ambiguous", { target: state.target });
+      const relative = (file) => validateRelativePath(path.relative(contract.repositoryPath, file).split(path.sep).join("/"), { allowDirectoryPrefix: false });
+      const expectedManifest = createHandoffManifest({ ticketId: contract.ticketId, baseSha: contract.baseSha, headSha: candidate.headSha, branch: candidate.branch, worktreePath: contract.worktreePath, changedPaths: candidate.changedPaths, pathHashes: candidate.pathHashes, patchPath: relative(patchPath), patchSha256, artifactMappings: contract.artifactMappings, validationLog: relative(validationLogPath), agent: { name: `${contract.worker.name}-${contract.runId}`, paneId: contract.worker.pane, kind: contract.worker.kind, session: contract.worker.session } });
+      const expectedManifestPath = path.join(runDirectory, "handoff.json");
+      const manifestPath = state.phase === "done" ? state.manifestPath : expectedManifestPath;
+      if (state.phase === "done") {
+        if (manifestPath !== expectedManifestPath || !/^[0-9a-f]{64}$/.test(state.manifestSha256 ?? "")) return reject("recovery manifest path or digest is ambiguous", { target: state.target });
+        let manifestBytes; let manifest; let rawManifest;
+        try { manifestBytes = safeFile(runDirectory, manifestPath, "recovery manifest"); rawManifest = JSON.parse(manifestBytes.toString("utf8")); manifest = createHandoffManifest(rawManifest); } catch { return reject("recovery manifest is missing or ambiguous", { target: state.target }); }
+        if (sha256(manifestBytes) !== state.manifestSha256 || JSON.stringify(rawManifest) !== JSON.stringify(expectedManifest) || JSON.stringify(manifest) !== JSON.stringify(expectedManifest)) return reject("recovery manifest digest or schema is ambiguous", { target: state.target });
+        return Object.freeze({ ticketId: contract.ticketId, status: "done", candidateHash: candidate.candidateHash, manifest, manifestPath });
+      }
+      if (beforeManifestPublish !== undefined) {
+        if (typeof beforeManifestPublish !== "function") return blocked(contract, "recovery publication hook is invalid", { target: state.target });
+        await beforeManifestPublish();
+      }
+      let finalCandidate; let finalResult; let finalPatch; let finalValidation;
+      try {
+        finalCandidate = await captureGit(processRunner, contract);
+        finalResult = readResult(runDirectory, state.resultPath, "review");
+        finalPatch = safeFile(runDirectory, patchPath, "recovery patch");
+        finalValidation = safeFile(runDirectory, validationLogPath, "recovery validation log");
+      } catch { return blocked(contract, "recovery evidence changed before publish", { target: state.target }); }
+      if (finalCandidate.candidateHash !== state.candidateHash || finalResult.sha256 !== result.sha256 || finalResult.candidateHash !== state.candidateHash || !finalPatch.equals(patchBytes) || sha256(finalPatch) !== state.patchSha256 || !finalValidation.equals(validationLogBytes) || sha256(finalValidation) !== state.validationLogSha256) return blocked(contract, "recovery evidence changed before publish", { target: state.target });
+      const finalManifest = createHandoffManifest({ ticketId: contract.ticketId, baseSha: contract.baseSha, headSha: finalCandidate.headSha, branch: finalCandidate.branch, worktreePath: contract.worktreePath, changedPaths: finalCandidate.changedPaths, pathHashes: finalCandidate.pathHashes, patchPath: relative(patchPath), patchSha256: state.patchSha256, artifactMappings: contract.artifactMappings, validationLog: relative(validationLogPath), agent: { name: `${contract.worker.name}-${contract.runId}`, paneId: contract.worker.pane, kind: contract.worker.kind, session: contract.worker.session } });
+      if (JSON.stringify(finalManifest) !== JSON.stringify(expectedManifest)) return blocked(contract, "recovery manifest binding changed before publish", { target: state.target });
+      let published;
+      try { published = publishManifest(runDirectory, manifestPath, expectedManifest); } catch { return blocked(contract, "recovery published manifest conflicts with evidence", { target: state.target }); }
+      atomicWriteJson(statePath, { version: 1, runId: contract.runId, ticketId: contract.ticketId, updatedAt: clock().toISOString(), phase: "done", round: state.round, target: state.target, resultPath: state.resultPath, resultSha256: finalResult.sha256, candidateHash: state.candidateHash, patchPath, patchSha256: state.patchSha256, validationLogPath, validationLogSha256: state.validationLogSha256, manifestPath, manifestSha256: published.sha256 });
+      return Object.freeze({ ticketId: contract.ticketId, status: "done", candidateHash: finalCandidate.candidateHash, manifest: published.manifest, manifestPath });
+    }
+    return stop(kind === "worker" ? "settled worker recovery cannot start a replacement reviewer" : `recovered review verdict requires operator resolution: ${result.verdict}`, { target: state.target, result });
   }
 
   return Object.freeze({ runTicket, recoverSettledResult });

@@ -94,24 +94,35 @@ export async function verifyIntegration(input, deps = {}) {
   if (!Array.isArray(input.manifests) || input.manifests.length === 0) throw new TypeError("manifests must be a non-empty array.");
   const processRunner = deps.processRunner;
   if (!processRunner?.run) throw new TypeError("processRunner.run is required.");
-  const status = await run(processRunner, "git", ["status", "--porcelain=v1", "-z", "--untracked-files=all"], repositoryPath);
-  if (status.length) throw new Error("integration checkout must be clean.");
-  const head = (await run(processRunner, "git", ["rev-parse", "HEAD"], repositoryPath)).toString("utf8").trim();
-  if (head !== integratedSha) throw new Error(`integration checkout HEAD mismatch: expected ${integratedSha}, found ${head}.`);
-  await run(processRunner, "git", ["merge-base", "--is-ancestor", previousBaseSha, integratedSha], repositoryPath);
   const verifiedPaths = [];
-  for (const manifest of input.manifests) {
-    plain(manifest, "manifest");
-    plain(manifest.pathHashes, "manifest.pathHashes");
-    for (const [file, expected] of Object.entries(manifest.pathHashes)) {
-      validateRelativePath(file, { allowDirectoryPrefix: false });
-      if (!/^[0-9a-f]{64}$/.test(expected)) throw new TypeError(`invalid path hash for ${file}.`);
-      let bytes;
-      try { bytes = await run(processRunner, "git", ["show", `${integratedSha}:${file}`], repositoryPath); } catch (cause) { throw new Error(`integrated path is missing: ${file}`, { cause }); }
-      if (sha256(bytes) !== expected) throw new Error(`integrated path hash mismatch: ${file}`);
-      verifiedPaths.push(file);
+  const verifySnapshot = async () => {
+    const status = await run(processRunner, "git", ["status", "--porcelain=v1", "-z", "--untracked-files=all"], repositoryPath);
+    if (status.length) throw new Error("integration checkout must be clean.");
+    const head = (await run(processRunner, "git", ["rev-parse", "HEAD"], repositoryPath)).toString("utf8").trim();
+    if (head !== integratedSha) throw new Error(`integration checkout HEAD mismatch: expected ${integratedSha}, found ${head}.`);
+    await run(processRunner, "git", ["merge-base", "--is-ancestor", previousBaseSha, integratedSha], repositoryPath);
+    for (const manifest of input.manifests) {
+      plain(manifest, "manifest");
+      plain(manifest.pathHashes, "manifest.pathHashes");
+      for (const [file, expected] of Object.entries(manifest.pathHashes)) {
+        validateRelativePath(file, { allowDirectoryPrefix: false });
+        if (!/^[0-9a-f]{64}$/.test(expected)) throw new TypeError(`invalid path hash for ${file}.`);
+        const absent = sha256(`absent\0${file}`);
+        const entry = await run(processRunner, "git", ["ls-tree", "-z", integratedSha, "--", file], repositoryPath);
+        if (entry.length === 0) {
+          if (expected !== absent) throw new Error(`integrated path is missing: ${file}`);
+          verifiedPaths.push(file); continue;
+        }
+        const match = entry.toString("utf8").match(/^(100644|100755) blob ([0-9a-f]{40}|[0-9a-f]{64})\t([^\0]+)\0$/);
+        if (!match || match[3] !== file) throw new Error(`integrated path type or identity mismatch: ${file}`);
+        if (expected === absent) throw new Error(`integrated path expected absent but exists: ${file}`);
+        const bytes = await run(processRunner, "git", ["cat-file", "blob", match[2]], repositoryPath);
+        if (sha256(bytes) !== expected) throw new Error(`integrated path hash mismatch: ${file}`);
+        verifiedPaths.push(file);
+      }
     }
-  }
+  };
+  await verifySnapshot();
   if (!input.validation || typeof input.validation.executable !== "string" || !Array.isArray(input.validation.args)) throw new TypeError("validation must be an argv command.");
   let validationCwd = repositoryPath;
   if (input.validation.cwd) {
@@ -123,6 +134,7 @@ export async function verifyIntegration(input, deps = {}) {
     validationCwd = realValidationCwd;
   }
   await run(processRunner, input.validation.executable, input.validation.args, validationCwd);
+  await verifySnapshot();
   return freeze({ previousBaseSha, integratedSha, verifiedPaths: [...new Set(verifiedPaths)].sort(), validation: { executable: input.validation.executable, args: [...input.validation.args] } });
 }
 
@@ -169,7 +181,7 @@ function validateRequest(value, runId) {
   return value;
 }
 
-export function createScheduler({ repositoryPath, runtimeDir, runTicket, processRunner, herdr, clock = () => new Date(), isProcessAlive = () => undefined, runnerOwner, maxConcurrency = 4 } = {}) {
+export function createScheduler({ repositoryPath, runtimeDir, runTicket, processRunner, herdr, clock = () => new Date(), isProcessAlive = () => undefined, runnerOwner, runnerLockHeld = false, maxConcurrency = 4 } = {}) {
   if (!path.isAbsolute(repositoryPath ?? "") || !path.isAbsolute(runtimeDir ?? "")) throw new TypeError("repositoryPath and runtimeDir must be absolute.");
   if (typeof runTicket !== "function" || !processRunner?.run || !herdr) throw new TypeError("runTicket, processRunner, and herdr are required.");
   if (!Number.isSafeInteger(maxConcurrency) || maxConcurrency < 1 || maxConcurrency > 8) throw new TypeError("maxConcurrency must be an integer from 1 through 8.");
@@ -347,7 +359,7 @@ export function createScheduler({ repositoryPath, runtimeDir, runTicket, process
   async function recover(options = {}) {
     if (!runnerOwner) throw new Error("runnerOwner is required for recovery lock ownership.");
     const lockPath = path.join(runtimeDir, "runner.lock");
-    const owner = acquireRunnerLock(lockPath, runnerOwner, { isOwnerAlive: isProcessAlive });
+    const owner = runnerLockHeld ? runnerOwner : acquireRunnerLock(lockPath, runnerOwner, { isOwnerAlive: isProcessAlive });
     try {
       const state = load();
       if (state.runId !== owner.runId) throw new Error("recovery lock runId does not match scheduler state.");
@@ -380,7 +392,7 @@ export function createScheduler({ repositoryPath, runtimeDir, runTicket, process
       save(state);
       return freeze({ status: state.phase, recovered });
     } finally {
-      releaseRunnerLock(lockPath, owner);
+      if (!runnerLockHeld) releaseRunnerLock(lockPath, owner);
     }
   }
 

@@ -6,6 +6,7 @@ import test from "node:test";
 import { execFileSync } from "node:child_process";
 import { createScheduler, readyTickets, validateTicketGraph, verifyIntegration } from "../extensions/lib/scheduler.mjs";
 import { sha256 } from "../extensions/lib/git-evidence.mjs";
+import { absentPathHash } from "../extensions/lib/runner.mjs";
 
 function git(cwd, ...args) { return execFileSync("git", args, { cwd, encoding: "utf8" }).trim(); }
 function repo() {
@@ -52,6 +53,34 @@ test("integration verifies clean ancestry, path bytes, then argv validation", as
   await assert.rejects(verifyIntegration({ previousBaseSha: base, integratedSha: head, manifests: [{ pathHashes: { "a.txt": sha256("integrated\n") } }], repositoryPath: root, validation: { executable: process.execPath, args: [], cwd: "../escape" } }, { processRunner: processRunner() }), /traverse|escapes/);
   fs.writeFileSync(path.join(root, "dirty"), "x");
   await assert.rejects(verifyIntegration({ previousBaseSha: base, integratedSha: head, manifests: [{ pathHashes: { "a.txt": sha256("integrated\n") } }], repositoryPath: root, validation: { executable: process.execPath, args: ["-e", "process.exit(0)"] } }, { processRunner: processRunner() }), /clean/);
+});
+
+test("integration accepts exact deletion sentinel and rejects absent/content mismatches and Git errors", async () => {
+  const root = repo(); const base = git(root, "rev-parse", "HEAD"); fs.unlinkSync(path.join(root, "a.txt")); git(root, "add", "."); git(root, "commit", "-m", "delete"); const head = git(root, "rev-parse", "HEAD");
+  const validation = { executable: process.execPath, args: ["-e", "process.exit(0)"] };
+  const deleted = absentPathHash("a.txt");
+  const evidence = await verifyIntegration({ previousBaseSha: base, integratedSha: head, manifests: [{ pathHashes: { "a.txt": deleted } }], repositoryPath: root, validation }, { processRunner: processRunner() }); assert.deepEqual(evidence.verifiedPaths, ["a.txt"]);
+  await assert.rejects(verifyIntegration({ previousBaseSha: base, integratedSha: head, manifests: [{ pathHashes: { "a.txt": sha256("base\n") } }], repositoryPath: root, validation }, { processRunner: processRunner() }), /missing/);
+  fs.writeFileSync(path.join(root, "a.txt"), "replacement\n"); git(root, "add", "."); git(root, "commit", "-m", "restore"); const restored = git(root, "rev-parse", "HEAD");
+  await assert.rejects(verifyIntegration({ previousBaseSha: base, integratedSha: restored, manifests: [{ pathHashes: { "a.txt": deleted } }], repositoryPath: root, validation }, { processRunner: processRunner() }), /expected absent/);
+  await assert.rejects(verifyIntegration({ previousBaseSha: base, integratedSha: restored, manifests: [{ pathHashes: { "a.txt": "bad" } }], repositoryPath: root, validation }, { processRunner: processRunner() }), /invalid path hash/);
+  const failing = { async run(spec) { if (spec.args[0] === "ls-tree") return { code: 128, stderr: Buffer.from("bad object") }; return processRunner().run(spec); } };
+  await assert.rejects(verifyIntegration({ previousBaseSha: base, integratedSha: restored, manifests: [{ pathHashes: { "a.txt": deleted } }], repositoryPath: root, validation }, { processRunner: failing }), /ls-tree.*failed/);
+  const tree = { async run(spec) { if (spec.args[0] === "ls-tree") return { code: 0, stdout: Buffer.from(`040000 tree ${"a".repeat(40)}\ta.txt\0`) }; return processRunner().run(spec); } };
+  await assert.rejects(verifyIntegration({ previousBaseSha: base, integratedSha: restored, manifests: [{ pathHashes: { "a.txt": deleted } }], repositoryPath: root, validation }, { processRunner: tree }), /type or identity mismatch/);
+  const submodule = { async run(spec) { if (spec.args[0] === "ls-tree") return { code: 0, stdout: Buffer.from(`160000 commit ${"a".repeat(40)}\ta.txt\0`) }; return processRunner().run(spec); } };
+  await assert.rejects(verifyIntegration({ previousBaseSha: base, integratedSha: restored, manifests: [{ pathHashes: { "a.txt": deleted } }], repositoryPath: root, validation }, { processRunner: submodule }), /type or identity mismatch/);
+});
+
+test("integration rechecks snapshot after validation mutation", async () => {
+  for (const mutation of ["tracked", "deletion", "head"]) {
+    const root = repo(); const base = git(root, "rev-parse", "HEAD");
+    if (mutation === "deletion") { fs.unlinkSync(path.join(root, "a.txt")); git(root, "add", "."); git(root, "commit", "-m", "delete"); }
+    else { fs.writeFileSync(path.join(root, "a.txt"), "integrated\n"); git(root, "add", "."); git(root, "commit", "-m", "integrate"); }
+    const head = git(root, "rev-parse", "HEAD"); const expected = mutation === "deletion" ? absentPathHash("a.txt") : sha256("integrated\n");
+    const script = mutation === "head" ? "require('node:child_process').execFileSync('git',['commit','--allow-empty','-m','move'])" : mutation === "deletion" ? "require('node:fs').writeFileSync('a.txt','recreated\\n')" : "require('node:fs').writeFileSync('a.txt','mutated\\n')";
+    await assert.rejects(verifyIntegration({ previousBaseSha: base, integratedSha: head, manifests: [{ pathHashes: { "a.txt": expected } }], repositoryPath: root, validation: { executable: process.execPath, args: ["-e", script] } }, { processRunner: processRunner() }), mutation === "head" ? /HEAD mismatch/ : /clean/);
+  }
 });
 
 test("stop race preserves stopped state after sibling settlement", async () => {

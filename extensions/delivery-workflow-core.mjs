@@ -5,9 +5,9 @@ import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { createDeliveryRunner, createProcessRunner, REVIEW_TOOLS, validateTicketRunContract } from "./delivery-runner.mjs";
 import { createHerdrAdapter } from "./lib/herdr.mjs";
-import { createScheduler, validateTicketGraph } from "./lib/scheduler.mjs";
+import { createScheduler, reconcileRunner, validateTicketGraph } from "./lib/scheduler.mjs";
 import { validateCommandSpec } from "./lib/contracts.mjs";
-import { atomicWriteJson, readJson } from "./lib/state.mjs";
+import { acquireRunnerLock, atomicWriteJson, readJson, releaseRunnerLock } from "./lib/state.mjs";
 
 export const REVIEWER_MODEL = "9router/cc/claude-opus-5-5";
 export const WORKER_MODEL = "9router/cx/gpt-5.6-sol";
@@ -37,7 +37,7 @@ function requestId(action) { return `${action}-${Date.now()}-${Math.random().toS
 
 export function createDeliveryWorkflowCore({ spawnProcess = spawn, now = () => new Date(), random = () => Math.random().toString(16).slice(2), processInbox } = {}) {
   const launch = (args, repositoryPath) => {
-    const child = spawnProcess(process.execPath, [ENTRY, ...args], { cwd: repositoryPath, env: { ...process.env, DELIVERY_WORKFLOW_PACKAGE_ROOT: ROOT }, detached: true, shell: false, stdio: "ignore" });
+    const child = spawnProcess(process.execPath, [ENTRY, ...args], { cwd: repositoryPath, env: { ...process.env, DELIVERY_WORKFLOW_PACKAGE_ROOT: ROOT, DELIVERY_RUNNER_PROCESS_START: `${process.pid}-${Date.now()}-${random()}` }, detached: true, shell: false, stdio: "ignore" });
     child.unref();
     return child.pid;
   };
@@ -136,26 +136,71 @@ function ticketContract(config, ticket) {
   const { id, dependencies: _dependencies, batch: _batch, ownedFiles, ...contract } = ticket;
   return { ...contract, version: 1, runId: config.runId, ticketId: id, planApproved: true, repositoryPath: config.repositoryPath, baseSha: config.baseSha, ownedPaths: contract.ownedPaths ?? ownedFiles, validation: contract.validation ?? config.validation, worker: { ...contract.worker, model: WORKER_MODEL }, reviewer: { ...contract.reviewer, model: REVIEWER_MODEL } };
 }
-async function runMain(runtimeDir) {
-  const config = readJson(path.join(runtimeDir, "config.json")); const processRunner = createProcessRunner(); const herdr = createHerdrAdapter({ cwd: config.repositoryPath }); const runner = createDeliveryRunner({ herdr, processRunner });
-  const scheduler = createScheduler({ repositoryPath: config.repositoryPath, runtimeDir, processRunner, herdr, maxConcurrency: config.maxConcurrency, runTicket: (ticket) => runner.runTicket(ticketContract(config, ticket)) });
-  let inboxQueue = Promise.resolve(); const processSerialized = () => { const next = inboxQueue.then(() => scheduler.processInbox({ tickets: config.tickets, validation: config.validation })); inboxQueue = next.then(() => undefined, () => undefined); return next; };
-  let batch;
-  for (;;) {
-    await processSerialized();
-    const current = readJson(path.join(runtimeDir, "state.json"));
-    if (["done", "stopped", "stop_unconfirmed"].includes(current.phase)) break;
-    if (current.phase === "ready" && !batch) batch = scheduler.startBatch(config.tickets).finally(() => { batch = undefined; });
-    await new Promise((resolve) => setTimeout(resolve, 250));
-  }
-  if (batch) await batch;
+function processAlive(owner) {
+  try { process.kill(owner.pid, 0); return true; } catch (error) { return error.code === "ESRCH" ? false : undefined; }
 }
+function blockRecovery(runtimeDir, reason) {
+  const statePath = path.join(runtimeDir, "state.json");
+  const current = readJson(statePath); const bounded = String(reason || "detached recovery is ambiguous").slice(0, 16_000);
+  const active = new Set(["allocating", "setting_up", "active", "validating", "review", "needs_fix", "worker_waiting", "review_waiting"]);
+  const tickets = Object.fromEntries(Object.entries(current.tickets).map(([id, ticket]) => [id, active.has(ticket.status) ? { ...ticket, status: "blocked", reason: bounded } : ticket]));
+  atomicWriteJson(statePath, { ...current, phase: "blocked", tickets, nextAction: "inspect retained runner and Herdr evidence", reason: bounded, updatedAt: new Date().toISOString() });
+}
+
+export async function runDetachedDelivery(runtimeDir, options = {}) {
+  const config = readJson(path.join(runtimeDir, "config.json"));
+  const isProcessAlive = options.isProcessAlive ?? processAlive;
+  const owner = options.runnerOwner ?? { version: 1, pid: process.pid, processStart: process.env.DELIVERY_RUNNER_PROCESS_START ?? `${process.pid}:${process.uptime()}`, runId: config.runId, createdAt: new Date().toISOString() };
+  const reconciliation = reconcileRunner(runtimeDir, { isProcessAlive });
+  if (reconciliation.status === "blocked") {
+    if (reconciliation.reason !== "runner owner is live") blockRecovery(runtimeDir, reconciliation.reason);
+    const error = new Error(reconciliation.reason); error.code = reconciliation.reason === "runner owner is live" ? "RUNNER_OWNED" : "RECOVERY_BLOCKED"; throw error;
+  }
+  const lockPath = path.join(runtimeDir, "runner.lock"); const runnerPath = path.join(runtimeDir, "runner.json");
+  try { acquireRunnerLock(lockPath, owner, { isOwnerAlive: isProcessAlive }); } catch (cause) {
+    const error = new Error(`runner ownership claim failed: ${cause instanceof Error ? cause.message : String(cause)}`, { cause }); error.code = "RUNNER_OWNED"; throw error;
+  }
+  atomicWriteJson(runnerPath, owner);
+  const processRunner = options.processRunner ?? createProcessRunner(); const herdr = options.herdr ?? createHerdrAdapter({ cwd: config.repositoryPath }); const runner = options.runner ?? createDeliveryRunner({ herdr, processRunner });
+  const scheduler = createScheduler({ repositoryPath: config.repositoryPath, runtimeDir, processRunner, herdr, maxConcurrency: config.maxConcurrency, runnerOwner: owner, runnerLockHeld: true, isProcessAlive, runTicket: (ticket) => runner.runTicket(ticketContract(config, ticket)) });
+  try {
+    const recovered = await scheduler.recover({ recoverTicket: async (id) => {
+      const retained = readJson(path.join(runtimeDir, id, "state.json"));
+      const kind = retained.phase === "worker_waiting" ? "worker" : ["review_waiting", "done"].includes(retained.phase) ? "review" : undefined;
+      if (!kind || typeof retained.target !== "string") return { status: "blocked", reason: "exact retained recovery identity is unavailable" };
+      return runner.recoverSettledResult(ticketContract(config, config.tickets.find((ticket) => ticket.id === id)), { expectedTarget: retained.target, expectedKind: kind, finalizeDone: true, ...(kind === "review" ? { expectedCandidateHash: retained.candidateHash } : {}) });
+    }});
+    if (recovered.status === "blocked") return recovered;
+    let inboxQueue = Promise.resolve(); const processSerialized = () => { const next = inboxQueue.then(() => scheduler.processInbox({ tickets: config.tickets, validation: config.validation })); inboxQueue = next.then(() => undefined, () => undefined); return next; };
+    let batch;
+    for (;;) {
+      await processSerialized();
+      const current = readJson(path.join(runtimeDir, "state.json"));
+      if (["done", "stopped", "stop_unconfirmed", "blocked"].includes(current.phase)) break;
+      if (current.phase === "ready" && !batch) batch = scheduler.startBatch(config.tickets).finally(() => { batch = undefined; });
+      await new Promise((resolve) => setTimeout(resolve, options.pollIntervalMs ?? 250));
+    }
+    if (batch) await batch;
+    return readJson(path.join(runtimeDir, "state.json"));
+  } catch (error) {
+    blockRecovery(runtimeDir, error instanceof Error ? error.message : String(error));
+    throw error;
+  } finally {
+    const phase = readJson(path.join(runtimeDir, "state.json")).phase;
+    if (["done", "stopped", "stop_unconfirmed", "blocked"].includes(phase)) {
+      if (phase !== "blocked") try { fs.unlinkSync(runnerPath); } catch (error) { if (error.code !== "ENOENT") throw error; }
+      releaseRunnerLock(lockPath, owner);
+    }
+  }
+}
+
+async function runMain(runtimeDir) { return runDetachedDelivery(runtimeDir); }
 
 if (process.argv[1] === ENTRY) {
   const [mode, target] = process.argv.slice(2);
   const main = mode === "run" ? runMain(target) : mode === "review" ? runStandaloneReview(target) : Promise.reject(new Error("unknown delivery runner mode"));
   main.catch((error) => {
-    if (mode === "run" && target) try { const current = readJson(path.join(target, "state.json")); atomicWriteJson(path.join(target, "state.json"), { ...current, phase: "blocked", nextAction: "inspect detached runner failure", reason: error instanceof Error ? error.message : String(error), updatedAt: new Date().toISOString() }); } catch { /* Existing durable state may itself be unreadable. */ }
+    if (mode === "run" && target && error?.code !== "RUNNER_OWNED") try { const current = readJson(path.join(target, "state.json")); atomicWriteJson(path.join(target, "state.json"), { ...current, phase: "blocked", nextAction: "inspect detached runner failure", reason: error instanceof Error ? error.message : String(error), updatedAt: new Date().toISOString() }); } catch { /* Existing durable state may itself be unreadable. */ }
     if (mode === "review" && target) try { writeReviewBlocked(reviewPaths(target).statusPath, error); } catch { /* Review main already persisted or trusted path was invalid. */ }
     process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`); process.exitCode = 1;
   });

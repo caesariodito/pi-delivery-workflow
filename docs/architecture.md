@@ -70,9 +70,9 @@ Parent controls requirements, product/architecture decisions, finding dispositio
 
 Run state lives under `.scratch/delivery/<run-id>/`. Prompt files, result pointers, validation logs, frozen patches, receipts, and manifests support inspection. Runner never infers completion from prose. Unknown process/agent identity, partial stop, missing result, or stale ownership blocks rather than spawning replacement.
 
-Detached entry does not wire automatic crash restart or reconciliation. A dead runner may leave phase `active` and durable inbox requests unconsumed. Operators must treat missing runner as blocked, send no controls, perform no integration, preserve all evidence, and escalate without fallback/replacement. Runner/scheduler exact-settled reconciliation functions are unit-tested internal seams only; detached runtime does not invoke them.
+Detached entry persists exclusive runner ownership and reconciles before inbox processing or scheduling. Only proven-stale ownership can be claimed. Exact settled, identity-bound reviewed results may resume; live, unknown, incomplete, or ambiguous ownership/recovery blocks affected lanes without replacement agents or model fallback.
 
-Parent integrates completed batch and calls `delivery_continue` with exact SHA. Scheduler verifies clean checkout, base ancestry, changed-file hashes, and validation before next batch. Verification currently expects content for every changed path, so deletions fail. Any deletion handoff must remain blocked and unintegrated pending deletion support.
+Parent integrates completed batch and calls `delivery_continue` with exact SHA. Scheduler verifies clean checkout, base ancestry, exact content hashes or path-bound absence sentinels, and validation before next batch. Deleted paths pass only when absent at integrated commit; Git and object-type errors fail closed.
 
 ## Limits
 

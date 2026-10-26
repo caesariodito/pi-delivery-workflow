@@ -378,6 +378,95 @@ test("result symlinks and loose permissions fail closed; untracked owned file en
   assert.match(fs.readFileSync(path.join(root, done.manifest.patchPath), "utf8"), /src\/new\.txt/);
 });
 
+test("ordinary run publishes manifest exclusively and accepts only exact secure existing bytes", async () => {
+  for (const mode of ["exact", "conflict", "malformed", "symlink", "hardlink", "mode-0400", "mode-0644", "mode-0200"]) {
+    const root = repository(); let original; let other;
+    const runner = createDeliveryRunner({ herdr: fakeHerdr(root).adapter, random: randomSequence(), beforeManifestPublish({ manifest, manifestPath }) {
+      const bytes = `${JSON.stringify(manifest)}\n`; original = bytes;
+      if (mode === "exact") fs.writeFileSync(manifestPath, bytes, { mode: 0o600 });
+      if (mode === "conflict") fs.writeFileSync(manifestPath, `${JSON.stringify({ ...manifest, branch: "other" })}\n`, { mode: 0o600 });
+      if (mode === "malformed") fs.writeFileSync(manifestPath, "{}\n", { mode: 0o600 });
+      if (mode === "symlink") { other = path.join(root, "other-manifest"); fs.writeFileSync(other, bytes, { mode: 0o600 }); fs.symlinkSync(other, manifestPath); }
+      if (mode === "hardlink") { other = path.join(root, "other-manifest"); fs.writeFileSync(other, bytes, { mode: 0o600 }); fs.linkSync(other, manifestPath); }
+      if (mode.startsWith("mode-")) fs.writeFileSync(manifestPath, bytes, { mode: Number.parseInt(mode.slice(5), 8) });
+    } });
+    const result = await runner.runTicket(contract(root)); const state = JSON.parse(fs.readFileSync(path.join(root, ".scratch/delivery/run-1/T003/state.json")));
+    if (mode === "exact") { assert.equal(result.status, "done"); assert.equal(state.phase, "done"); assert.equal(fs.readFileSync(result.manifestPath, "utf8"), original); }
+    else { assert.equal(result.status, "blocked", mode); assert.equal(state.phase, "blocked", mode); const manifestPath = path.join(root, ".scratch/delivery/run-1/T003/handoff.json"); if (["conflict", "malformed"].includes(mode)) assert.notEqual(fs.readFileSync(manifestPath, "utf8"), original, mode); else if (mode.startsWith("mode-")) assert.equal(fs.statSync(manifestPath).mode & 0o777, Number.parseInt(mode.slice(5), 8)); else if (mode === "symlink") assert.equal(fs.lstatSync(manifestPath).isSymbolicLink(), true); else assert.equal(fs.lstatSync(manifestPath).nlink, 2); }
+  }
+});
+
+test("ordinary completion revalidates evidence and manifest inode after hooks", async () => {
+  for (const mode of ["candidate", "result", "patch", "validation", "path-swap", "after-create"]) {
+    const root = repository(); let createdInode; let replacedBytes;
+    const options = { herdr: fakeHerdr(root).adapter, random: randomSequence(), beforeManifestPublish() {
+      const directory = path.join(root, ".scratch/delivery/run-1/T003");
+      if (mode === "candidate") fs.appendFileSync(path.join(root, "src/value.txt"), "race\n");
+      const state = JSON.parse(fs.readFileSync(path.join(directory, "state.json")));
+      if (mode === "result") fs.appendFileSync(state.resultPath, "race\n");
+      if (mode === "patch") fs.appendFileSync(state.patchPath, "race\n");
+      if (mode === "validation") fs.appendFileSync(state.validationLogPath, "race\n");
+    }, beforeManifestOpen({ filePath }) { if (mode === "path-swap") { const other = `${filePath}.swap`; fs.writeFileSync(other, "{}\n", { mode: 0o600 }); fs.renameSync(other, filePath); } }, afterManifestCreate({ manifestPath }) { if (mode === "after-create") { createdInode = fs.statSync(manifestPath).ino; replacedBytes = Buffer.from("{}\n"); const other = `${manifestPath}.replacement`; fs.writeFileSync(other, replacedBytes, { mode: 0o600 }); fs.renameSync(other, manifestPath); } } };
+    const result = await createDeliveryRunner(options).runTicket(contract(root)); const directory = path.join(root, ".scratch/delivery/run-1/T003"); const state = JSON.parse(fs.readFileSync(path.join(directory, "state.json")));
+    assert.equal(result.status, "blocked", mode); assert.equal(state.phase, "blocked", mode);
+    if (mode === "after-create") { const manifestPath = path.join(directory, "handoff.json"); assert.notEqual(fs.statSync(manifestPath).ino, createdInode); assert.deepEqual(fs.readFileSync(manifestPath), replacedBytes); }
+  }
+});
+
+test("done recovery is idempotent and validates retained patch, result, manifest, and candidate", async () => {
+  const root = repository(); const herdr = fakeHerdr(root); const runner = createDeliveryRunner({ herdr: herdr.adapter, random: randomSequence() }); const input = contract(root);
+  const done = await runner.runTicket(input); const directory = path.join(root, ".scratch/delivery/run-1/T003"); const statePath = path.join(directory, "state.json"); const originalBytes = fs.readFileSync(statePath); const originalState = JSON.parse(originalBytes);
+  const recovered = await runner.recoverSettledResult(input, { expectedTarget: originalState.target, expectedKind: "review", expectedCandidateHash: done.candidateHash, finalizeDone: true });
+  assert.deepEqual(recovered, done); assert.deepEqual(fs.readFileSync(statePath), originalBytes);
+  for (const damage of ["alter-result", "missing-result", "alter-patch", "missing-patch", "alter-validation", "missing-validation", "alter-manifest", "missing-manifest", "candidate"]) {
+    const damagedRoot = repository(); const damagedRunner = createDeliveryRunner({ herdr: fakeHerdr(damagedRoot).adapter, random: randomSequence() }); const damagedInput = contract(damagedRoot); await damagedRunner.runTicket(damagedInput);
+    const damagedDirectory = path.join(damagedRoot, ".scratch/delivery/run-1/T003"); const damagedStatePath = path.join(damagedDirectory, "state.json"); const before = fs.readFileSync(damagedStatePath); const damagedState = JSON.parse(before);
+    const files = { result: damagedState.resultPath, patch: damagedState.patchPath, validation: damagedState.validationLogPath, manifest: damagedState.manifestPath };
+    const [action, evidence] = damage.split("-"); if (files[evidence]) action === "missing" ? fs.unlinkSync(files[evidence]) : fs.appendFileSync(files[evidence], "tamper\n");
+    if (damage === "candidate") fs.appendFileSync(path.join(damagedRoot, "src/value.txt"), "drift\n");
+    const blocked = await damagedRunner.recoverSettledResult(damagedInput, { expectedTarget: damagedState.target, expectedKind: "review", expectedCandidateHash: damagedState.candidateHash, finalizeDone: true });
+    assert.equal(blocked.status, "blocked", damage); assert.match(blocked.reason, /ambiguous|missing/, damage); assert.deepEqual(fs.readFileSync(damagedStatePath), before, damage);
+  }
+});
+
+test("waiting review recovery requires exact persisted patch and validation evidence", async () => {
+  for (const damage of ["patch", "validation", "path", "incomplete"]) {
+    const root = repository(); const runner = createDeliveryRunner({ herdr: fakeHerdr(root).adapter, random: randomSequence() }); const input = contract(root); await runner.runTicket(input);
+    const directory = path.join(root, ".scratch/delivery/run-1/T003"); const statePath = path.join(directory, "state.json"); const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    const promptPath = path.join(directory, `review-${state.round}-nonce2.prompt`); state.phase = "review_waiting"; state.promptPath = promptPath; state.promptSha256 = createHash("sha256").update(fs.readFileSync(promptPath)).digest("hex"); delete state.manifestPath; delete state.manifestSha256;
+    if (damage === "patch") fs.appendFileSync(state.patchPath, "tamper\n");
+    if (damage === "validation") fs.appendFileSync(state.validationLogPath, "tamper\n");
+    if (damage === "path") state.patchPath = path.join(directory, "other.patch");
+    if (damage === "incomplete") delete state.validationLogSha256;
+    fs.writeFileSync(statePath, `${JSON.stringify(state)}\n`, { mode: 0o600 });
+    const blocked = await runner.recoverSettledResult(input, { expectedTarget: state.target, expectedKind: "review", expectedCandidateHash: state.candidateHash, finalizeDone: true });
+    assert.equal(blocked.status, "blocked", damage); assert.match(blocked.reason, /ambiguous/, damage);
+  }
+});
+
+test("waiting review publication revalidates races and handles pre-existing manifests", async () => {
+  const prepare = async (manifestMode = "absent") => {
+    const root = repository(); const runner = createDeliveryRunner({ herdr: fakeHerdr(root).adapter, random: randomSequence() }); const input = contract(root); const done = await runner.runTicket(input);
+    const directory = path.join(root, ".scratch/delivery/run-1/T003"); const statePath = path.join(directory, "state.json"); const state = JSON.parse(fs.readFileSync(statePath, "utf8")); const manifestBytes = fs.readFileSync(state.manifestPath);
+    const promptPath = path.join(directory, `review-${state.round}-nonce2.prompt`); state.phase = "review_waiting"; state.promptPath = promptPath; state.promptSha256 = createHash("sha256").update(fs.readFileSync(promptPath)).digest("hex"); delete state.resultSha256; delete state.manifestPath; delete state.manifestSha256;
+    fs.writeFileSync(statePath, `${JSON.stringify(state)}\n`, { mode: 0o600 });
+    const manifestPath = path.join(directory, "handoff.json"); if (manifestMode === "absent") fs.unlinkSync(manifestPath); else if (manifestMode === "conflict") fs.writeFileSync(manifestPath, "{}\n", { mode: 0o600 }); else assert.deepEqual(fs.readFileSync(manifestPath), manifestBytes);
+    return { root, runner, input, done, state, statePath, manifestPath };
+  };
+  for (const race of ["candidate", "result", "validation", "patch"]) {
+    const value = await prepare(); const before = fs.readFileSync(value.statePath);
+    const recovered = await value.runner.recoverSettledResult(value.input, { expectedTarget: value.state.target, expectedKind: "review", expectedCandidateHash: value.state.candidateHash, finalizeDone: true, beforeManifestPublish() {
+      if (race === "candidate") fs.appendFileSync(path.join(value.root, "src/value.txt"), "race\n");
+      if (race === "result") fs.appendFileSync(value.state.resultPath, "race\n");
+      if (race === "validation") fs.appendFileSync(value.state.validationLogPath, "race\n");
+      if (race === "patch") fs.appendFileSync(value.state.patchPath, "race\n");
+    } });
+    assert.equal(recovered.status, "blocked", race); assert.equal(fs.existsSync(value.manifestPath), false, race); assert.notEqual(JSON.parse(fs.readFileSync(value.statePath)).phase, "done", race); assert.deepEqual(fs.readFileSync(value.statePath), before, race);
+  }
+  const exact = await prepare("exact"); const accepted = await exact.runner.recoverSettledResult(exact.input, { expectedTarget: exact.state.target, expectedKind: "review", expectedCandidateHash: exact.state.candidateHash, finalizeDone: true }); assert.equal(accepted.status, "done"); assert.deepEqual(accepted.manifest, exact.done.manifest);
+  const conflict = await prepare("conflict"); const rejected = await conflict.runner.recoverSettledResult(conflict.input, { expectedTarget: conflict.state.target, expectedKind: "review", expectedCandidateHash: conflict.state.candidateHash, finalizeDone: true }); assert.equal(rejected.status, "blocked"); assert.notEqual(JSON.parse(fs.readFileSync(conflict.statePath)).phase, "done"); assert.equal(fs.readFileSync(conflict.manifestPath, "utf8"), "{}\n");
+});
+
 test("recovery validates identity and candidate hash, then consumes waiting state", async () => {
   const root = repository();
   const input = contract(root);
