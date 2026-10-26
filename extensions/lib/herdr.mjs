@@ -9,6 +9,16 @@ const FIXTURE_PROVEN_VERSIONS = new Set([HERDR_BASELINE_VERSION]);
 const DEFAULT_TIMEOUT_MS = 30_000;
 const PROCESS_TIMEOUT_GRACE_MS = 5_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 1024 * 1024;
+const CHILD_ENV_KEYS = Object.freeze(["PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "CI", "VOLTA_HOME", "NVM_BIN", "NVM_DIR", "FNM_DIR", "COREPACK_HOME", "HERDR_SESSION", "HERDR_SESSION_ID", "HERDR_SOCKET", "HERDR_SOCKET_PATH"]);
+const FIXTURE_ENV_KEYS = new Set(["HERDR_ARGV_LOG", "HERDR_DELAY_MS", "HERDR_BIG_OUTPUT", "HERDR_MALFORMED", "HERDR_ERROR", "HERDR_STATUS_FIXTURE"]);
+
+export function buildChildEnvironment(source = process.env, overrides = {}) {
+  const env = {};
+  for (const key of CHILD_ENV_KEYS) if (typeof source[key] === "string" && source[key] !== "") env[key] = source[key];
+  env.HERDR_ENV = "1";
+  for (const [key, value] of Object.entries(overrides)) if ((CHILD_ENV_KEYS.includes(key) || FIXTURE_ENV_KEYS.has(key)) && typeof value === "string" && value !== "") env[key] = value;
+  return Object.freeze(env);
+}
 
 export class HerdrError extends Error {
   constructor(message, { code = "herdr_error", command = [], exitCode, stderr = "", cause } = {}) {
@@ -97,7 +107,7 @@ export function createHerdrAdapter({
     return new Promise((resolve, reject) => {
       execFile(executable, command, {
         cwd,
-        env: env ? { ...process.env, ...env } : process.env,
+        env: buildChildEnvironment(process.env, env),
         encoding: "utf8",
         maxBuffer: maxOutputBytes,
         timeout,

@@ -1,4 +1,4 @@
-export type LifecycleState = "ready" | "allocating" | "setting_up" | "active" | "validating" | "review" | "needs_fix" | "stopping" | "stopped" | "stop_unconfirmed" | "done" | "awaiting_integration" | "blocked";
+export type LifecycleState = "ready" | "allocating" | "active" | "validating" | "review" | "needs_fix" | "stopping" | "stopped" | "stop_unconfirmed" | "done" | "awaiting_integration" | "blocked";
 export type OwnershipPath = Readonly<{ path: string; directory: boolean }>;
 export type CommandSpec = Readonly<{ executable: string; args: string[]; cwd?: string }>;
 export type ControlRequest = Readonly<{ version: 1; requestId: string; runId: string; action: "stop" | "status" | "message"; message?: string; createdAt: string }>;

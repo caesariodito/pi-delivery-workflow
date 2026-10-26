@@ -5,7 +5,7 @@ import { sha256 } from "./git-evidence.mjs";
 import { acquireRunnerLock, atomicWriteJson, readJson, releaseRunnerLock, writeReceipt } from "./state.mjs";
 
 const SHA = /^[0-9a-f]{40}$|^[0-9a-f]{64}$/;
-const TICKET_STATES = new Set(["ready", "allocating", "setting_up", "active", "validating", "review", "needs_fix", "stopping", "stopped", "stop_unconfirmed", "done", "awaiting_integration", "blocked"]);
+const TICKET_STATES = new Set(["ready", "allocating", "active", "validating", "review", "needs_fix", "stopping", "stopped", "stop_unconfirmed", "done", "awaiting_integration", "blocked"]);
 const PHASES = new Set(["ready", "active", "awaiting_integration", "blocked", "stopping", "stopped", "stop_unconfirmed", "done"]);
 const REQUEST_ACTIONS = new Set(["steer", "reply", "continue", "stop"]);
 const WIDENING = /\b(dependenc(?:y|ies)|ownership|owned paths?|scope|product|architecture|model|migration|publish(?:ing|ation)?|deploy(?:ment)?|release)\b/i;
@@ -149,7 +149,7 @@ export function reconcileRunner(runtimeDir, { isProcessAlive } = {}) {
   let lock;
   let runner;
   try { lock = readJson(lockPath); runner = readJson(runnerPath); } catch { return Object.freeze({ status: "blocked", reason: "runner ownership evidence is unreadable" }); }
-  if (!lock || !runner || lock.version !== 1 || runner.version !== 1 || lock.runId !== runner.runId || lock.pid !== runner.pid || lock.processStart !== runner.processStart) return Object.freeze({ status: "blocked", reason: "runner ownership evidence is ambiguous" });
+  if (!lock || !runner || lock.version !== 1 || runner.version !== 1 || lock.runId !== runner.runId || lock.pid !== runner.pid || lock.ownershipToken !== runner.ownershipToken || !/^[0-9a-f]{64}$/.test(runner.ownershipToken ?? "")) return Object.freeze({ status: "blocked", reason: "runner ownership evidence is ambiguous" });
   if (typeof isProcessAlive !== "function") return Object.freeze({ status: "blocked", reason: "runner owner liveness is unknown", owner: freeze({ ...runner }) });
   let alive;
   try { alive = isProcessAlive(freeze({ ...runner })); } catch { alive = undefined; }
@@ -281,7 +281,7 @@ export function createScheduler({ repositoryPath, runtimeDir, runTicket, process
 
   async function stopTicket(_state, ticketIdValue) {
     const marked = await updateState((state) => {
-      const candidates = Object.entries(state.tickets).filter(([id, value]) => (!ticketIdValue || id === ticketIdValue) && ["active", "allocating", "setting_up", "validating", "review", "needs_fix"].includes(value.status));
+      const candidates = Object.entries(state.tickets).filter(([id, value]) => (!ticketIdValue || id === ticketIdValue) && ["active", "allocating", "validating", "review", "needs_fix"].includes(value.status));
       if (!candidates.length) throw new Error("no matching live ticket to stop.");
       state.phase = "stopping";
       for (const [id, value] of candidates) state.tickets[id] = { ...value, status: "stopping" };

@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
+  buildChildEnvironment,
   createHerdrAdapter,
   checkCompatibility,
   EXTRACTION_VERDICT,
@@ -27,6 +28,12 @@ function harness(extraEnv = {}, options = {}) {
   });
   return { adapter, argv: () => fs.readFileSync(argvLog, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse) };
 }
+
+test("child environment allowlists required context and excludes secrets", () => {
+  const env = buildChildEnvironment({ PATH: "/bin", HOME: "/tmp/home", HERDR_SESSION_ID: "session", OPENAI_API_KEY: "secret", RANDOM_REPO_VALUE: "no" });
+  assert.deepEqual(env, { PATH: "/bin", HOME: "/tmp/home", HERDR_ENV: "1", HERDR_SESSION_ID: "session" });
+  assert.equal("OPENAI_API_KEY" in env, false); assert.equal("RANDOM_REPO_VALUE" in env, false);
+});
 
 test("pins Herdr baseline and refuses protocol mismatch", async () => {
   assert.equal(HERDR_BASELINE_VERSION, "0.9.5");

@@ -14,6 +14,7 @@ export type JsonObject = Record<string, unknown>;
 
 export function parseJsonOutput(stdout: string, label?: string): JsonObject;
 export function checkCompatibility(version: string, protocol: number): { version: string; protocol: number; baseline: boolean };
+export function buildChildEnvironment(source?: NodeJS.ProcessEnv, overrides?: NodeJS.ProcessEnv): Readonly<NodeJS.ProcessEnv>;
 
 export interface HerdrAdapterOptions {
   executable?: string;

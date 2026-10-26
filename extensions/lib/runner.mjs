@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { validateCommandSpec, validateOwnedPaths, validateRelativePath, validateRunId, validateTicketId } from "./contracts.mjs";
 import { createHandoffManifest, findOwnershipViolations, parsePorcelainV1Z, sha256 } from "./git-evidence.mjs";
-import { atomicWriteJson, readJson } from "./state.mjs";
+import { appendJsonLine, atomicWriteJson, readJson, readSecureFile, readSecureJson } from "./state.mjs";
 import { EXTRACTION_VERDICT } from "./herdr.mjs";
 
 const MAX_TEXT = 128 * 1024;
@@ -15,6 +15,7 @@ const REVIEW_RESULT_TOOL = "delivery_result_write";
 const REVIEW_EXTENSION = fileURLToPath(new URL("../reviewer-result-tool.ts", import.meta.url));
 const RESULT_PROTOCOL = "result-file-pointer";
 const REVIEW_VERDICTS = new Set(["ok", "needs_fix", "blocked"]);
+const TRANSITION_OPERATIONS = new Set(["herdr.status", "herdr.worktreeCreate", "herdr.agentStart.worker", "herdr.agentPrompt.worker", "validation", "herdr.agentStart.reviewer", "herdr.agentPrompt.reviewer"]);
 
 export function absentPathHash(file) {
   return sha256(`absent\0${validateRelativePath(file, { allowDirectoryPrefix: false })}`);
@@ -55,7 +56,7 @@ function agent(value, label) {
 
 export function validateTicketRunContract(value) {
   plain(value, "ticket run contract");
-  exact(value, ["version", "runId", "ticketId", "planApproved", "repositoryPath", "worktreePath", "baseSha", "branch", "ticket", "context", "ownedPaths", "forbiddenPaths", "validation", "maxFixRounds", "agentTimeoutMs", "worker", "reviewer", "artifactMappings"], "ticket run contract");
+  exact(value, ["version", "runId", "ticketId", "planApproved", "repositoryPath", "worktreeRoot", "worktreeRootIdentity", "worktreePath", "baseSha", "branch", "ticket", "context", "ownedPaths", "forbiddenPaths", "validation", "maxFixRounds", "agentTimeoutMs", "worker", "reviewer", "artifactMappings"], "ticket run contract");
   if (value.version !== 1) throw new TypeError("ticket run contract version must be 1.");
   if (value.planApproved !== true) throw new Error("ticket run requires explicit plan approval.");
   if (typeof value.baseSha !== "string" || !/^[0-9a-f]{40}$|^[0-9a-f]{64}$/.test(value.baseSha)) throw new TypeError("baseSha must be a lowercase Git object ID.");
@@ -73,6 +74,8 @@ export function validateTicketRunContract(value) {
     ticketId: validateTicketId(value.ticketId),
     planApproved: true,
     repositoryPath: absolute(value.repositoryPath, "repositoryPath"),
+    worktreeRoot: absolute(value.worktreeRoot, "worktreeRoot"),
+    worktreeRootIdentity: (() => { plain(value.worktreeRootIdentity, "worktreeRootIdentity"); exact(value.worktreeRootIdentity, ["path", "dev", "ino", "mode", "uid", "gid"], "worktreeRootIdentity"); const identity = value.worktreeRootIdentity; const integers = [identity.dev, identity.ino, identity.mode, identity.uid, identity.gid]; if (identity.path !== value.worktreeRoot || path.normalize(identity.path) !== identity.path || !path.isAbsolute(identity.path) || integers.some((item) => !Number.isSafeInteger(item) || item < 0) || identity.mode > 0o7777) throw new TypeError("worktreeRootIdentity must bind canonical root with safe device, inode, mode, and owner values."); return { ...identity }; })(),
     worktreePath: absolute(value.worktreePath, "worktreePath"),
     baseSha: value.baseSha,
     branch: text(value.branch, "branch", 512),
@@ -96,7 +99,7 @@ function deepFreeze(value) {
   return Object.freeze(value);
 }
 
-export function createProcessRunner({ timeoutMs = DEFAULT_PROCESS_TIMEOUT_MS, maxOutputBytes = DEFAULT_PROCESS_OUTPUT_BYTES } = {}) {
+export function createProcessRunner({ timeoutMs = DEFAULT_PROCESS_TIMEOUT_MS, maxOutputBytes = DEFAULT_PROCESS_OUTPUT_BYTES, env } = {}) {
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 300_000) throw new TypeError("timeoutMs must be an integer from 1 through 300000.");
   if (!Number.isSafeInteger(maxOutputBytes) || maxOutputBytes < 1 || maxOutputBytes > 16 * 1024 * 1024) throw new TypeError("maxOutputBytes must be an integer from 1 through 16777216.");
   return Object.freeze({
@@ -104,7 +107,7 @@ export function createProcessRunner({ timeoutMs = DEFAULT_PROCESS_TIMEOUT_MS, ma
       if (!spec || typeof spec.executable !== "string" || !Array.isArray(spec.args) || spec.args.some((arg) => typeof arg !== "string")) throw new TypeError("process spec requires executable and string args.");
       return new Promise((resolve, reject) => {
         const grouped = process.platform !== "win32";
-        const child = spawn(spec.executable, spec.args, { cwd: spec.cwd, detached: grouped, shell: false, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+        const child = spawn(spec.executable, spec.args, { cwd: spec.cwd, env: spec.env ?? env, detached: grouped, shell: false, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
         const stdout = [];
         const stderr = [];
         let bytes = 0;
@@ -122,10 +125,10 @@ export function createProcessRunner({ timeoutMs = DEFAULT_PROCESS_TIMEOUT_MS, ma
           try { if (grouped && child.pid) process.kill(-child.pid, "SIGKILL"); else child.kill("SIGKILL"); } catch (error) { if (error.code !== "ESRCH") return finish(undefined, error); }
           finish({ code: null, signal: "SIGKILL", timedOut: reason === "timeout", outputLimit: reason === "output-limit", stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr) });
         };
-        timer = setTimeout(() => terminate("timeout"), timeoutMs);
+        timer = setTimeout(() => terminate("timeout"), spec.timeoutMs ?? timeoutMs);
         const collect = (target) => (chunk) => {
           bytes += chunk.length;
-          if (bytes > maxOutputBytes) return terminate("output-limit");
+          if (bytes > (spec.maxOutputBytes ?? maxOutputBytes)) return terminate("output-limit");
           target.push(chunk);
         };
         child.stdout.on("data", collect(stdout));
@@ -300,8 +303,9 @@ function protocol(herdr) {
   if (selected !== RESULT_PROTOCOL) throw new Error(`unsupported Herdr extraction protocol: ${String(selected)}.`);
 }
 
-export function createDeliveryRunner({ herdr, processRunner = createProcessRunner(), clock = () => new Date(), random = () => Math.random().toString(16).slice(2), notifier = async () => {}, beforeManifestPublish = async () => {}, beforeManifestOpen, afterManifestCreate } = {}) {
+export function createDeliveryRunner({ herdr, processRunner = createProcessRunner(), runDigest, clock = () => new Date(), random = () => Math.random().toString(16).slice(2), notifier = async () => {}, beforeManifestPublish = async () => {}, beforeManifestOpen, afterManifestCreate } = {}) {
   if (!herdr || typeof herdr !== "object") throw new TypeError("herdr adapter is required.");
+  if (!/^[0-9a-f]{64}$/.test(runDigest ?? "")) throw new TypeError("runDigest must be a lowercase SHA-256 digest.");
   if (!processRunner || typeof processRunner.run !== "function") throw new TypeError("processRunner.run is required.");
   if (typeof clock !== "function" || typeof random !== "function" || typeof notifier !== "function" || typeof beforeManifestPublish !== "function" || (beforeManifestOpen !== undefined && typeof beforeManifestOpen !== "function") || (afterManifestCreate !== undefined && typeof afterManifestCreate !== "function")) throw new TypeError("runner hooks must be functions.");
 
@@ -311,18 +315,39 @@ export function createDeliveryRunner({ herdr, processRunner = createProcessRunne
     fs.mkdirSync(runDirectory, { recursive: true, mode: 0o700 });
     fs.chmodSync(runDirectory, 0o700);
     const statePath = path.join(runDirectory, "state.json");
+    const transitionsPath = path.join(runDirectory, "transitions.jsonl"); const transitionHeadPath = path.join(runDirectory, "transition-head.json");
+    const immutableRunDigest = runDigest;
     const writeState = (state) => atomicWriteJson(statePath, { version: 1, runId: contract.runId, ticketId: contract.ticketId, updatedAt: clock().toISOString(), ...state });
+    let transitionSequence = 0; let transitionHash = immutableRunDigest;
+    const journal = (record) => { const chained = { ...record, previousHash: transitionHash }; const hash = sha256(JSON.stringify(chained)); appendJsonLine(transitionsPath, { ...chained, hash }); transitionHash = hash; atomicWriteJson(transitionHeadPath, { version: 1, runDigest: immutableRunDigest, sequence: record.sequence, hash }); };
+    const external = async (operation, action) => {
+      if (!TRANSITION_OPERATIONS.has(operation)) throw new Error(`unsupported transition operation: ${operation}`);
+      const sequence = ++transitionSequence;
+      journal({ version: 1, sequence, operation, stage: "intended", at: clock().toISOString() });
+      try {
+        const value = await action();
+        const failed = value && typeof value === "object" && (value.code !== undefined || value.signal || value.timedOut || value.outputLimit) && (value.code !== 0 || value.signal || value.timedOut || value.outputLimit);
+        journal({ version: 1, sequence, operation, stage: "observed", outcome: failed ? "failed" : "ok", ...(value && typeof value === "object" && value.code !== undefined ? { exitCode: value.code, signal: value.signal ?? null, timedOut: value.timedOut === true, outputLimit: value.outputLimit === true } : {}), at: clock().toISOString() });
+        return value;
+      } catch (error) {
+        journal({ version: 1, sequence, operation, stage: "observed", outcome: "failed", at: clock().toISOString() });
+        throw error;
+      }
+    };
     const finishBlocked = (reason, evidence = {}) => {
       writeState({ phase: "blocked", reason });
       return blocked(contract, reason, evidence);
     };
     try {
       protocol(herdr);
-      await herdr.status();
-      const setup = await herdr.worktreeCreate({ cwd: contract.repositoryPath, branch: contract.branch, base: contract.baseSha, path: contract.worktreePath, label: contract.ticketId, focus: false });
-      if (!setup?.path || path.resolve(setup.path) !== contract.worktreePath || setup.pane !== contract.worker.pane) throw new Error("Herdr worktree path or pane did not match approved contract.");
+      await external("herdr.status", () => herdr.status());
+      const rootBefore = fs.lstatSync(contract.worktreeRoot); const expectedRoot = contract.worktreeRootIdentity; if (!rootBefore.isDirectory() || rootBefore.isSymbolicLink() || rootBefore.dev !== expectedRoot.dev || rootBefore.ino !== expectedRoot.ino || (rootBefore.mode & 0o7777) !== expectedRoot.mode || rootBefore.uid !== expectedRoot.uid || rootBefore.gid !== expectedRoot.gid) throw new Error("worktreeRoot identity is invalid before allocation.");
+      const setup = await external("herdr.worktreeCreate", () => herdr.worktreeCreate({ cwd: contract.repositoryPath, branch: contract.branch, base: contract.baseSha, path: contract.worktreePath, label: contract.ticketId, focus: false }));
+      const rootAfter = fs.lstatSync(contract.worktreeRoot); if (rootAfter.dev !== expectedRoot.dev || rootAfter.ino !== expectedRoot.ino || (rootAfter.mode & 0o7777) !== expectedRoot.mode || rootAfter.uid !== expectedRoot.uid || rootAfter.gid !== expectedRoot.gid || !rootAfter.isDirectory() || rootAfter.isSymbolicLink()) throw new Error("worktreeRoot identity changed during allocation.");
+      const returnedPath = setup?.path ? fs.realpathSync(setup.path) : undefined; const rootPath = fs.realpathSync(contract.worktreeRoot);
+      if (!returnedPath || path.resolve(returnedPath) !== fs.realpathSync(contract.worktreePath) || !returnedPath.startsWith(`${rootPath}${path.sep}`) || setup.pane !== contract.worker.pane) throw new Error("Herdr worktree path or pane did not match approved root contract.");
       const workerTarget = `${contract.worker.name}-${contract.runId}`;
-      await herdr.agentStart({ name: workerTarget, kind: contract.worker.kind, pane: contract.worker.pane, timeout: contract.agentTimeoutMs, agentArgs: ["--model", contract.worker.model] });
+      await external("herdr.agentStart.worker", () => herdr.agentStart({ name: workerTarget, kind: contract.worker.kind, pane: contract.worker.pane, timeout: contract.agentTimeoutMs, agentArgs: ["--model", contract.worker.model] }));
       let findings;
       let candidate;
       let validationLogPath;
@@ -334,12 +359,12 @@ export function createDeliveryRunner({ herdr, processRunner = createProcessRunne
         const prompt = workerPrompt(contract, workerResultPath, findings);
         const promptSha256 = exclusiveWrite(workerPromptPath, prompt);
         writeState({ phase: "worker_waiting", round, target: workerTarget, resultPath: workerResultPath, promptPath: workerPromptPath, promptSha256 });
-        await herdr.agentPrompt({ target: workerTarget, prompt: `Read prompt file ${workerPromptPath} (SHA-256 ${promptSha256}) and follow it exactly.`, wait: true, until: ["done", "blocked"], timeout: contract.agentTimeoutMs });
+        await external("herdr.agentPrompt.worker", () => herdr.agentPrompt({ target: workerTarget, prompt: `Read prompt file ${workerPromptPath} (SHA-256 ${promptSha256}) and follow it exactly.`, wait: true, until: ["done", "blocked"], timeout: contract.agentTimeoutMs }));
         const workerResult = readResult(runDirectory, workerResultPath, "worker");
         if (workerResult.status === "blocked") return finishBlocked("worker blocked", { workerResult });
         const preGate = await captureGit(processRunner, contract);
         validationLogPath = path.join(runDirectory, `validation-${round}.log`);
-        const gate = await processRunner.run({ ...contract.validation, cwd: contract.validation.cwd ? path.join(contract.worktreePath, contract.validation.cwd) : contract.worktreePath });
+        const gate = await external("validation", () => processRunner.run({ ...contract.validation, cwd: contract.validation.cwd ? path.join(contract.worktreePath, contract.validation.cwd) : contract.worktreePath }));
         const gateLog = Buffer.concat([Buffer.from(gate.stdout ?? ""), Buffer.from(gate.stderr ?? "")]);
         const validationLogSha256 = exclusiveWrite(validationLogPath, gateLog);
         if (gate.code !== 0 || gate.signal || gate.timedOut || gate.outputLimit) return finishBlocked("validation failed", { exitCode: gate.code, signal: gate.signal ?? null, timedOut: gate.timedOut === true, outputLimit: gate.outputLimit === true, validationLog: validationLogPath });
@@ -357,8 +382,8 @@ export function createDeliveryRunner({ herdr, processRunner = createProcessRunne
         const reviewPrompt = reviewerPrompt(contract, candidate, reviewerResultPath, reviewerNonce, patchPath, patchSha256, validationLogPath);
         const reviewPromptSha256 = exclusiveWrite(reviewerPromptPath, reviewPrompt);
         writeState({ phase: "review_waiting", round, target: reviewerTarget, resultPath: reviewerResultPath, promptPath: reviewerPromptPath, promptSha256: reviewPromptSha256, candidateHash: candidate.candidateHash, patchPath, patchSha256, validationLogPath, validationLogSha256 });
-        await herdr.agentStart({ name: reviewerTarget, kind: contract.reviewer.kind, pane: contract.reviewer.pane, timeout: contract.agentTimeoutMs, agentArgs: ["--model", contract.reviewer.model, "--extension", REVIEW_EXTENSION, "--delivery-result-path", reviewerResultPath, "--delivery-result-nonce", reviewerNonce, "--tools", [...REVIEW_TOOLS, REVIEW_RESULT_TOOL].join(",")] });
-        await herdr.agentPrompt({ target: reviewerTarget, prompt: `Read prompt file ${reviewerPromptPath} (SHA-256 ${reviewPromptSha256}) and follow it exactly.`, wait: true, until: ["done", "blocked"], timeout: contract.agentTimeoutMs });
+        await external("herdr.agentStart.reviewer", () => herdr.agentStart({ name: reviewerTarget, kind: contract.reviewer.kind, pane: contract.reviewer.pane, timeout: contract.agentTimeoutMs, agentArgs: ["--model", contract.reviewer.model, "--extension", REVIEW_EXTENSION, "--delivery-result-path", reviewerResultPath, "--delivery-result-nonce", reviewerNonce, "--tools", [...REVIEW_TOOLS, REVIEW_RESULT_TOOL].join(",")] }));
+        await external("herdr.agentPrompt.reviewer", () => herdr.agentPrompt({ target: reviewerTarget, prompt: `Read prompt file ${reviewerPromptPath} (SHA-256 ${reviewPromptSha256}) and follow it exactly.`, wait: true, until: ["done", "blocked"], timeout: contract.agentTimeoutMs }));
         const review = readResult(runDirectory, reviewerResultPath, "review");
         if (review.candidateHash !== candidate.candidateHash) return finishBlocked("review did not bind frozen candidate", { review });
         const afterReview = await captureGit(processRunner, contract);
@@ -411,6 +436,13 @@ export function createDeliveryRunner({ herdr, processRunner = createProcessRunne
     const contract = validateTicketRunContract(input);
     const runDirectory = path.join(contract.repositoryPath, ".scratch", "delivery", contract.runId, contract.ticketId);
     const statePath = path.join(runDirectory, "state.json");
+    const transitionsPath = path.join(runDirectory, "transitions.jsonl");
+    try {
+      const lines = readSecureFile(transitionsPath, 4 * 1024 * 1024).toString("utf8").split("\n"); if (lines.pop() !== "") throw new Error("transition journal is truncated.");
+      const head = readSecureJson(path.join(runDirectory, "transition-head.json")); if (!head || Object.keys(head).sort().join(",") !== "hash,runDigest,sequence,version" || head.version !== 1 || head.runDigest !== runDigest || !/^[0-9a-f]{64}$/.test(head.runDigest) || !/^[0-9a-f]{64}$/.test(head.hash) || !Number.isSafeInteger(head.sequence) || head.sequence < 1) throw new Error("transition journal head schema or run digest is invalid."); let expected = 1; let chain = runDigest;
+      for (let index = 0; index < lines.length; index += 2) { const intended = JSON.parse(lines[index]); const observed = JSON.parse(lines[index + 1]); if (!TRANSITION_OPERATIONS.has(intended.operation) && intended.operation !== "retained") throw new Error("transition journal operation is invalid."); const check = (record) => { const { hash, ...body } = record; if (body.previousHash !== chain || sha256(JSON.stringify(body)) !== hash) throw new Error("transition journal hash chain is invalid."); chain = hash; }; check(intended); if (!observed || intended.version !== 1 || intended.sequence !== expected || intended.stage !== "intended" || observed.version !== 1 || observed.sequence !== expected || observed.operation !== intended.operation || observed.stage !== "observed" || !["ok", "failed"].includes(observed.outcome)) throw new Error("transition journal sequence or pairing is invalid."); check(observed); expected += 1; }
+      if (head.hash !== chain || head.sequence !== expected - 1) throw new Error("transition journal head is invalid.");
+    } catch (cause) { throw new Error("transition journal is missing or invalid.", { cause }); }
     const stop = (reason, evidence = {}) => {
       fs.mkdirSync(runDirectory, { recursive: true, mode: 0o700 });
       atomicWriteJson(statePath, { version: 1, runId: contract.runId, ticketId: contract.ticketId, updatedAt: clock().toISOString(), phase: "blocked", reason });

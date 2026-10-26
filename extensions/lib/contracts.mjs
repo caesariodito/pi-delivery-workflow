@@ -8,8 +8,7 @@ const CONTROL_ACTIONS = new Set(["stop", "status", "message"]);
 
 export const LIFECYCLE_TRANSITIONS = Object.freeze(Object.fromEntries(Object.entries({
   ready: ["allocating", "blocked", "stopping"],
-  allocating: ["setting_up", "blocked", "stopping"],
-  setting_up: ["active", "blocked", "stopping"],
+  allocating: ["active", "blocked", "stopping"],
   active: ["validating", "blocked", "stopping"],
   validating: ["review", "blocked", "stopping"],
   review: ["done", "needs_fix", "blocked", "stopping"],
@@ -111,7 +110,8 @@ export function validateLifecycleTransition(from, to) {
 }
 
 export function validateCommandSpec(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).some((key) => !["executable", "args", "cwd"].includes(key))) {
+  const allowed = ["executable", "args", "cwd"];
+  if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).some((key) => !allowed.includes(key))) {
     throw new TypeError("command must contain only executable, args, and optional cwd.");
   }
   if (typeof value.executable !== "string" || !value.executable || value.executable.length > 1024 || /[\u0000\r\n]/.test(value.executable)) {

@@ -30,7 +30,8 @@ export default function deliveryWorkflow(pi: ExtensionAPI) {
   };
 
   register("delivery_review", "Launch fixed-model fresh read-only review.", Type.Object({ runId: Text(128), kind: Type.Union([Type.Literal("spec"), Type.Literal("plan"), Type.Literal("implementation")]), artifact: Text(4096), contextBundle: Text(4096), focus: Type.Optional(Text(4000)) }, { additionalProperties: false }), core.review);
-  register("delivery_start", "Start approved detached delivery run.", Type.Object({ runId: Text(128), baseSha: Type.String({ pattern: "^[0-9a-f]{40}([0-9a-f]{24})?$" }), tickets: Text(131_072), validation: Type.Object({ executable: Text(1024), args: Type.Array(Type.String({ maxLength: 8192 }), { maxItems: 256 }), cwd: Type.Optional(Text(1024)) }, { additionalProperties: false }), maxConcurrency: Type.Optional(Type.Integer({ minimum: 1, maximum: 8 })) }, { additionalProperties: false }), core.start);
+  const command = { executable: Text(1024), args: Type.Array(Type.String({ maxLength: 8192 }), { maxItems: 256 }), cwd: Type.Optional(Text(1024)) };
+  register("delivery_start", "Start approved detached delivery run.", Type.Object({ runId: Text(128), baseSha: Type.String({ pattern: "^[0-9a-f]{40}([0-9a-f]{24})?$" }), tickets: Text(131_072), worktreeRoot: Text(4096), validation: Type.Object(command, { additionalProperties: false }), maxConcurrency: Type.Optional(Type.Integer({ minimum: 1, maximum: 8 })) }, { additionalProperties: false }), core.start);
   register("delivery_status", "Read durable delivery status.", Run, core.status);
   register("delivery_steer", "Queue bounded guidance for active ticket.", Message, core.steer);
   register("delivery_reply", "Reply to existing blocked-ticket question.", Message, core.reply);

@@ -56,15 +56,18 @@ export function atomicWriteJson(filePath, value) {
 
 export function appendJsonLine(filePath, value) {
   ensureParent(filePath);
-  const fd = fs.openSync(filePath, "a", 0o600);
+  const flags = fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_CREAT | (fs.constants.O_NOFOLLOW ?? 0);
+  const fd = fs.openSync(filePath, flags, 0o600);
   try {
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile() || stat.nlink !== 1 || (stat.mode & 0o777) !== 0o600) throw new Error("JSON lines file must be a regular singly-linked 0600 file.");
     fs.writeFileSync(fd, json(value), "utf8");
     syncFile(fd);
-  } finally {
-    fs.closeSync(fd);
-  }
+  } finally { fs.closeSync(fd); }
   return value;
 }
+
+export function writeExclusiveJson(filePath, value) { return exclusiveJson(filePath, value); }
 
 export function readJson(filePath) {
   const stat = fs.statSync(filePath);
@@ -72,13 +75,23 @@ export function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, "utf8"));
 }
 
+export function readSecureFile(filePath, maximum = MAX_JSON_BYTES) {
+  if (fs.constants.O_NOFOLLOW === undefined) throw new Error("secure file requires O_NOFOLLOW support.");
+  const fd = fs.openSync(filePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  try { const stat = fs.fstatSync(fd); const identity = fs.lstatSync(filePath); if (!stat.isFile() || stat.nlink !== 1 || identity.isSymbolicLink() || identity.dev !== stat.dev || identity.ino !== stat.ino || (stat.mode & 0o777) !== 0o600 || stat.size > maximum) throw new Error("secure file must be a stable singly-linked 0600 file."); const bytes = Buffer.alloc(stat.size); let offset = 0; while (offset < bytes.length) { const count = fs.readSync(fd, bytes, offset, bytes.length - offset, offset); if (!count) throw new Error("secure file changed while reading."); offset += count; } if (fs.readSync(fd, Buffer.alloc(1), 0, 1, offset)) throw new Error("secure file changed while reading."); return bytes; } finally { fs.closeSync(fd); }
+}
+
+export function readSecureJson(filePath) {
+  return JSON.parse(readSecureFile(filePath).toString("utf8"));
+}
+
 function lockRecord(owner) {
   const created = typeof owner?.createdAt === "string" ? new Date(owner.createdAt) : undefined;
   const validCreatedAt = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(owner?.createdAt ?? "") && Number.isFinite(created?.valueOf()) && created.toISOString() === owner.createdAt;
-  if (!owner || typeof owner !== "object" || owner.version !== 1 || !Number.isSafeInteger(owner.pid) || owner.pid <= 0 || typeof owner.processStart !== "string" || !owner.processStart || owner.processStart.length > 256 || !validCreatedAt) {
-    throw new TypeError("lock owner requires version 1, positive pid, processStart, runId, and createdAt.");
+  if (!owner || typeof owner !== "object" || owner.version !== 1 || !Number.isSafeInteger(owner.pid) || owner.pid <= 0 || !/^[0-9a-f]{64}$/.test(owner.ownershipToken ?? "") || (owner.contractDigest !== undefined && !/^[0-9a-f]{64}$/.test(owner.contractDigest)) || !validCreatedAt) {
+    throw new TypeError("lock owner requires version 1, positive pid, 256-bit ownershipToken, runId, and createdAt.");
   }
-  return { version: 1, pid: owner.pid, processStart: owner.processStart, runId: validateRunId(owner.runId), createdAt: owner.createdAt };
+  return { version: 1, pid: owner.pid, ownershipToken: owner.ownershipToken, ...(owner.contractDigest ? { contractDigest: owner.contractDigest } : {}), runId: validateRunId(owner.runId), createdAt: owner.createdAt };
 }
 
 export function acquireRunnerLock(lockPath, owner, options = {}) {
@@ -118,7 +131,7 @@ export function acquireRunnerLock(lockPath, owner, options = {}) {
 export function releaseRunnerLock(lockPath, owner) {
   const expected = lockRecord(owner);
   const current = lockRecord(readJson(lockPath));
-  if (current.pid !== expected.pid || current.processStart !== expected.processStart || current.runId !== expected.runId) throw new Error("runner lock ownership does not match.");
+  if (current.pid !== expected.pid || current.ownershipToken !== expected.ownershipToken || current.runId !== expected.runId) throw new Error("runner lock ownership does not match.");
   fs.unlinkSync(lockPath);
 }
 

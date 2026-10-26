@@ -33,6 +33,8 @@ function contract(root, overrides = {}) {
     ticketId: "T003",
     planApproved: true,
     repositoryPath: root,
+    worktreeRoot: path.dirname(root),
+    worktreeRootIdentity: (() => { const stat = fs.lstatSync(path.dirname(root)); return { path: path.dirname(root), dev: stat.dev, ino: stat.ino, mode: stat.mode & 0o7777, uid: stat.uid, gid: stat.gid }; })(),
     worktreePath: root,
     baseSha: git(root, "rev-parse", "HEAD"),
     branch: "ticket/T003",
@@ -72,6 +74,7 @@ function writeRecoveryState(directory, state) {
   const prompt = "exact persisted prompt\n";
   fs.writeFileSync(promptPath, prompt, { mode: 0o600 });
   fs.writeFileSync(path.join(directory, "state.json"), `${JSON.stringify({ ...state, promptPath, promptSha256: createHash("sha256").update(prompt).digest("hex") })}\n`, { mode: 0o600 });
+  const runDigest = TEST_RUN_DIGEST; const firstBody = { version: 1, sequence: 1, operation: "retained", stage: "intended", at: "2026-01-01T00:00:00.000Z", previousHash: runDigest }; const first = { ...firstBody, hash: createHash("sha256").update(JSON.stringify(firstBody)).digest("hex") }; const secondBody = { version: 1, sequence: 1, operation: "retained", stage: "observed", outcome: "ok", at: "2026-01-01T00:00:00.001Z", previousHash: first.hash }; const second = { ...secondBody, hash: createHash("sha256").update(JSON.stringify(secondBody)).digest("hex") }; fs.writeFileSync(path.join(directory, "transitions.jsonl"), `${JSON.stringify(first)}\n${JSON.stringify(second)}\n`, { mode: 0o600 }); fs.writeFileSync(path.join(directory, "transition-head.json"), `${JSON.stringify({ version: 1, runDigest, sequence: 1, hash: second.hash })}\n`, { mode: 0o600 });
 }
 
 function fakeHerdr(root, verdicts = ["ok"], options = {}) {
@@ -105,6 +108,7 @@ function fakeHerdr(root, verdicts = ["ok"], options = {}) {
   return { adapter, calls, counts: () => ({ reviews, workers }) };
 }
 
+const TEST_RUN_DIGEST = "d".repeat(64);
 function randomSequence() {
   let value = 0;
   return () => `nonce${++value}`;
@@ -136,6 +140,12 @@ test("validates and deeply freezes approved serial contract", () => {
   assert.throws(() => validateTicketRunContract(contract(root, { agentTimeoutMs: 300_001 })), /1 through 300000/);
   assert.equal(validateTicketRunContract(contract(root, { agentTimeoutMs: 45_000 })).agentTimeoutMs, 45_000);
   assert.throws(() => validateTicketRunContract({ ...contract(root), extra: true }), /unsupported fields/);
+  assert.throws(() => createDeliveryRunner({ herdr: {}, runDigest: "bad" }), /runDigest/);
+  assert.throws(() => validateTicketRunContract(contract(root, { worktreeRootIdentity: { ...contract(root).worktreeRootIdentity, uid: -1 } })), /safe device/);
+});
+
+test("ticket contract rejects removed setup field", () => {
+  const root = repository(); assert.throws(() => validateTicketRunContract(contract(root, { setup: { executable: "node", args: [] } })), /unsupported fields/);
 });
 
 test("requires Git evidence, passing gate, fresh review, stable hash, and manifest before done", async () => {
@@ -143,7 +153,7 @@ test("requires Git evidence, passing gate, fresh review, stable hash, and manife
   const herdr = fakeHerdr(root);
   const processRunner = instrumentedProcessRunner();
   const notices = [];
-  const runner = createDeliveryRunner({ herdr: herdr.adapter, processRunner, clock: () => new Date("2026-01-01T00:00:00.000Z"), random: randomSequence(), notifier: async (notice) => notices.push(notice) });
+  const runner = createDeliveryRunner({ runDigest: TEST_RUN_DIGEST, herdr: herdr.adapter, processRunner, clock: () => new Date("2026-01-01T00:00:00.000Z"), random: randomSequence(), notifier: async (notice) => notices.push(notice) });
   const result = await runner.runTicket(contract(root));
   assert.equal(result.status, "done");
   assert.deepEqual(result.manifest.changedPaths, ["src/value.txt"]);
@@ -171,7 +181,7 @@ test("each accepted fix reruns gate and launches a fresh reviewer", async () => 
   const root = repository();
   const herdr = fakeHerdr(root, ["needs_fix", "needs_fix", "ok"]);
   const processRunner = instrumentedProcessRunner();
-  const result = await createDeliveryRunner({ herdr: herdr.adapter, processRunner, random: randomSequence() }).runTicket(contract(root));
+  const result = await createDeliveryRunner({ runDigest: TEST_RUN_DIGEST, herdr: herdr.adapter, processRunner, random: randomSequence() }).runTicket(contract(root));
   assert.equal(result.status, "done");
   assert.deepEqual(herdr.counts(), { workers: 3, reviews: 3 });
   assert.equal(new Set(herdr.calls.filter(([name, value]) => name === "agentStart" && value.name.startsWith("reviewer-")).map(([, value]) => value.name)).size, 3);
@@ -183,7 +193,7 @@ test("fails closed on ownership, gate, review drift, fix limit, and protocol mis
     const root = repository();
     const herdr = fakeHerdr(root);
     const bad = contract(root, { ownedPaths: ["test/"] });
-    await assert.rejects(createDeliveryRunner({ herdr: herdr.adapter }).runTicket(bad), /ownership violation/);
+    await assert.rejects(createDeliveryRunner({ runDigest: TEST_RUN_DIGEST, herdr: herdr.adapter }).runTicket(bad), /ownership violation/);
   }
   {
     const root = repository();
@@ -194,13 +204,13 @@ test("fails closed on ownership, gate, review drift, fix limit, and protocol mis
       if (resultPath(pointer(input.prompt)).content.startsWith("Immutable approved ticket")) fs.writeFileSync(path.join(root, "package.json"), "{}\n");
       return result;
     };
-    await assert.rejects(createDeliveryRunner({ herdr: herdr.adapter }).runTicket(contract(root)), /ownership violation/);
+    await assert.rejects(createDeliveryRunner({ runDigest: TEST_RUN_DIGEST, herdr: herdr.adapter }).runTicket(contract(root)), /ownership violation/);
   }
   {
     const root = repository();
     const herdr = fakeHerdr(root);
     const badGate = contract(root, { validation: { executable: process.execPath, args: ["-e", "process.exit(7)"] } });
-    const result = await createDeliveryRunner({ herdr: herdr.adapter }).runTicket(badGate);
+    const result = await createDeliveryRunner({ runDigest: TEST_RUN_DIGEST, herdr: herdr.adapter }).runTicket(badGate);
     assert.equal(result.status, "blocked");
     assert.equal(result.reason, "validation failed");
     assert.equal(herdr.counts().reviews, 0);
@@ -208,14 +218,14 @@ test("fails closed on ownership, gate, review drift, fix limit, and protocol mis
   {
     const root = repository();
     const herdr = fakeHerdr(root, ["ok"], { driftDuringReview: true });
-    const result = await createDeliveryRunner({ herdr: herdr.adapter }).runTicket(contract(root));
+    const result = await createDeliveryRunner({ runDigest: TEST_RUN_DIGEST, herdr: herdr.adapter }).runTicket(contract(root));
     assert.equal(result.status, "blocked");
     assert.equal(result.reason, "candidate drifted during review");
   }
   {
     const root = repository();
     const herdr = fakeHerdr(root, ["needs_fix"]);
-    const result = await createDeliveryRunner({ herdr: herdr.adapter }).runTicket(contract(root, { maxFixRounds: 0 }));
+    const result = await createDeliveryRunner({ runDigest: TEST_RUN_DIGEST, herdr: herdr.adapter }).runTicket(contract(root, { maxFixRounds: 0 }));
     assert.equal(result.status, "blocked");
     assert.equal(result.reason, "fix-round limit reached");
   }
@@ -223,7 +233,7 @@ test("fails closed on ownership, gate, review drift, fix limit, and protocol mis
     const root = repository();
     const herdr = fakeHerdr(root);
     herdr.adapter.extractionVerdict = "terminal-envelope";
-    await assert.rejects(createDeliveryRunner({ herdr: herdr.adapter }).runTicket(contract(root)), /unsupported Herdr extraction protocol/);
+    await assert.rejects(createDeliveryRunner({ runDigest: TEST_RUN_DIGEST, herdr: herdr.adapter }).runTicket(contract(root)), /unsupported Herdr extraction protocol/);
     assert.deepEqual(herdr.calls, []);
   }
 });
@@ -237,7 +247,7 @@ test("serial recovery harvests exact settled pointer and never prompts on ambigu
   writeResult(resultFile, { version: 1, status: "done", summary: "settled" });
   writeRecoveryState(runDirectory, { version: 1, runId: "run-1", ticketId: "T003", phase: "worker_waiting", target: "worker-run-1", resultPath: resultFile });
   const herdr = fakeHerdr(root);
-  const runner = createDeliveryRunner({ herdr: herdr.adapter });
+  const runner = createDeliveryRunner({ runDigest: TEST_RUN_DIGEST, herdr: herdr.adapter });
   const recovered = await runner.recoverSettledResult(input, { expectedTarget: "worker-run-1", expectedKind: "worker" });
   assert.equal(recovered.status, "recovered");
   assert.equal(recovered.result.summary, "settled");
@@ -249,7 +259,7 @@ test("serial recovery harvests exact settled pointer and never prompts on ambigu
   const secondResult = path.join(secondDirectory, "worker-result.json");
   writeResult(secondResult, { version: 1, status: "done", summary: "settled" });
   writeRecoveryState(secondDirectory, { version: 1, runId: "run-1", ticketId: "T003", phase: "worker_waiting", target: "worker-run-1", resultPath: secondResult });
-  const ambiguous = await createDeliveryRunner({ herdr: fakeHerdr(secondRoot).adapter }).recoverSettledResult(secondInput, { expectedTarget: "other" });
+  const ambiguous = await createDeliveryRunner({ runDigest: TEST_RUN_DIGEST, herdr: fakeHerdr(secondRoot).adapter }).recoverSettledResult(secondInput, { expectedTarget: "other" });
   assert.equal(ambiguous.status, "blocked");
   assert.match(ambiguous.reason, /ambiguous/);
   assert.equal(herdr.calls.filter(([name]) => name === "agentPrompt").length, 0);
@@ -277,7 +287,7 @@ test("validation mutation blocks candidate before reviewer launch", async () => 
   const root = repository();
   const herdr = fakeHerdr(root);
   const input = contract(root, { validation: { executable: process.execPath, args: ["-e", "require('node:fs').writeFileSync('src/value.txt', 'gate mutation\\n')"] } });
-  const result = await createDeliveryRunner({ herdr: herdr.adapter, random: randomSequence() }).runTicket(input);
+  const result = await createDeliveryRunner({ runDigest: TEST_RUN_DIGEST, herdr: herdr.adapter, random: randomSequence() }).runTicket(input);
   assert.equal(result.status, "blocked");
   assert.equal(result.reason, "candidate drifted during validation");
   assert.equal(herdr.counts().reviews, 0);
@@ -287,10 +297,10 @@ test("validation mutation blocks candidate before reviewer launch", async () => 
   assert.equal(state.reason, "candidate drifted during validation");
 });
 
-test("setup identity, prompts, artifacts, and reviewer nonce bind approved candidate", async () => {
+test("worktree identity, prompts, artifacts, and reviewer nonce bind approved candidate", async () => {
   const root = repository();
   const herdr = fakeHerdr(root);
-  const runner = createDeliveryRunner({ herdr: herdr.adapter, random: randomSequence() });
+  const runner = createDeliveryRunner({ runDigest: TEST_RUN_DIGEST, herdr: herdr.adapter, random: randomSequence() });
   const result = await runner.runTicket(contract(root));
   assert.equal(result.status, "done");
   const prompts = herdr.calls.filter(([name]) => name === "agentPrompt").map(([, input]) => fs.readFileSync(pointer(input.prompt), "utf8"));
@@ -305,7 +315,7 @@ test("setup identity, prompts, artifacts, and reviewer nonce bind approved candi
   const mismatchRoot = repository();
   const mismatch = fakeHerdr(mismatchRoot);
   mismatch.adapter.worktreeCreate = async () => ({ path: mismatchRoot, pane: "wrong" });
-  await assert.rejects(createDeliveryRunner({ herdr: mismatch.adapter }).runTicket(contract(mismatchRoot)), /path or pane/);
+  await assert.rejects(createDeliveryRunner({ runDigest: TEST_RUN_DIGEST, herdr: mismatch.adapter }).runTicket(contract(mismatchRoot)), /path or pane/);
   assert.equal(JSON.parse(fs.readFileSync(path.join(mismatchRoot, ".scratch/delivery/run-1/T003/state.json"), "utf8")).phase, "blocked");
 });
 
@@ -325,7 +335,7 @@ test("review result schema and pre-existing files fail closed with final blocked
       writeResult(result.path, { ...reviewValue, candidateHash: hash });
       return { agent: { status: "done" } };
     };
-    await assert.rejects(createDeliveryRunner({ herdr: herdr.adapter, random: randomSequence() }).runTicket(contract(root)), /ok review must not|needs_fix review requires/);
+    await assert.rejects(createDeliveryRunner({ runDigest: TEST_RUN_DIGEST, herdr: herdr.adapter, random: randomSequence() }).runTicket(contract(root)), /ok review must not|needs_fix review requires/);
     assert.equal(JSON.parse(fs.readFileSync(path.join(root, ".scratch/delivery/run-1/T003/state.json"), "utf8")).phase, "blocked");
   }
 
@@ -341,7 +351,7 @@ test("review result schema and pre-existing files fail closed with final blocked
     }
     return "workernonce";
   };
-  await assert.rejects(createDeliveryRunner({ herdr: herdr.adapter, random: preexistingRandom }).runTicket(contract(root)), /already exists/);
+  await assert.rejects(createDeliveryRunner({ runDigest: TEST_RUN_DIGEST, herdr: herdr.adapter, random: preexistingRandom }).runTicket(contract(root)), /already exists/);
 });
 
 test("result symlinks and loose permissions fail closed; untracked owned file enters patch", async () => {
@@ -361,7 +371,7 @@ test("result symlinks and loose permissions fail closed; untracked owned file en
       }
       return { agent: { status: "done" } };
     };
-    await assert.rejects(createDeliveryRunner({ herdr: herdr.adapter, random: randomSequence() }).runTicket(contract(root)), /worker result is missing or invalid/);
+    await assert.rejects(createDeliveryRunner({ runDigest: TEST_RUN_DIGEST, herdr: herdr.adapter, random: randomSequence() }).runTicket(contract(root)), /worker result is missing or invalid/);
   }
 
   const root = repository();
@@ -373,7 +383,7 @@ test("result symlinks and loose permissions fail closed; untracked owned file en
     if (resultPath(pointer(call.prompt)).content.startsWith("Immutable approved ticket")) fs.writeFileSync(path.join(root, "src/new.txt"), "untracked\n");
     return result;
   };
-  const done = await createDeliveryRunner({ herdr: herdr.adapter, random: randomSequence() }).runTicket(input);
+  const done = await createDeliveryRunner({ runDigest: TEST_RUN_DIGEST, herdr: herdr.adapter, random: randomSequence() }).runTicket(input);
   assert.deepEqual(done.manifest.changedPaths, ["src/new.txt", "src/value.txt"]);
   assert.match(fs.readFileSync(path.join(root, done.manifest.patchPath), "utf8"), /src\/new\.txt/);
 });
@@ -381,7 +391,7 @@ test("result symlinks and loose permissions fail closed; untracked owned file en
 test("ordinary run publishes manifest exclusively and accepts only exact secure existing bytes", async () => {
   for (const mode of ["exact", "conflict", "malformed", "symlink", "hardlink", "mode-0400", "mode-0644", "mode-0200"]) {
     const root = repository(); let original; let other;
-    const runner = createDeliveryRunner({ herdr: fakeHerdr(root).adapter, random: randomSequence(), beforeManifestPublish({ manifest, manifestPath }) {
+    const runner = createDeliveryRunner({ runDigest: TEST_RUN_DIGEST, herdr: fakeHerdr(root).adapter, random: randomSequence(), beforeManifestPublish({ manifest, manifestPath }) {
       const bytes = `${JSON.stringify(manifest)}\n`; original = bytes;
       if (mode === "exact") fs.writeFileSync(manifestPath, bytes, { mode: 0o600 });
       if (mode === "conflict") fs.writeFileSync(manifestPath, `${JSON.stringify({ ...manifest, branch: "other" })}\n`, { mode: 0o600 });
@@ -399,7 +409,7 @@ test("ordinary run publishes manifest exclusively and accepts only exact secure 
 test("ordinary completion revalidates evidence and manifest inode after hooks", async () => {
   for (const mode of ["candidate", "result", "patch", "validation", "path-swap", "after-create"]) {
     const root = repository(); let createdInode; let replacedBytes;
-    const options = { herdr: fakeHerdr(root).adapter, random: randomSequence(), beforeManifestPublish() {
+    const options = { runDigest: TEST_RUN_DIGEST, herdr: fakeHerdr(root).adapter, random: randomSequence(), beforeManifestPublish() {
       const directory = path.join(root, ".scratch/delivery/run-1/T003");
       if (mode === "candidate") fs.appendFileSync(path.join(root, "src/value.txt"), "race\n");
       const state = JSON.parse(fs.readFileSync(path.join(directory, "state.json")));
@@ -414,12 +424,12 @@ test("ordinary completion revalidates evidence and manifest inode after hooks", 
 });
 
 test("done recovery is idempotent and validates retained patch, result, manifest, and candidate", async () => {
-  const root = repository(); const herdr = fakeHerdr(root); const runner = createDeliveryRunner({ herdr: herdr.adapter, random: randomSequence() }); const input = contract(root);
+  const root = repository(); const herdr = fakeHerdr(root); const runner = createDeliveryRunner({ runDigest: TEST_RUN_DIGEST, herdr: herdr.adapter, random: randomSequence() }); const input = contract(root);
   const done = await runner.runTicket(input); const directory = path.join(root, ".scratch/delivery/run-1/T003"); const statePath = path.join(directory, "state.json"); const originalBytes = fs.readFileSync(statePath); const originalState = JSON.parse(originalBytes);
   const recovered = await runner.recoverSettledResult(input, { expectedTarget: originalState.target, expectedKind: "review", expectedCandidateHash: done.candidateHash, finalizeDone: true });
   assert.deepEqual(recovered, done); assert.deepEqual(fs.readFileSync(statePath), originalBytes);
   for (const damage of ["alter-result", "missing-result", "alter-patch", "missing-patch", "alter-validation", "missing-validation", "alter-manifest", "missing-manifest", "candidate"]) {
-    const damagedRoot = repository(); const damagedRunner = createDeliveryRunner({ herdr: fakeHerdr(damagedRoot).adapter, random: randomSequence() }); const damagedInput = contract(damagedRoot); await damagedRunner.runTicket(damagedInput);
+    const damagedRoot = repository(); const damagedRunner = createDeliveryRunner({ runDigest: TEST_RUN_DIGEST, herdr: fakeHerdr(damagedRoot).adapter, random: randomSequence() }); const damagedInput = contract(damagedRoot); await damagedRunner.runTicket(damagedInput);
     const damagedDirectory = path.join(damagedRoot, ".scratch/delivery/run-1/T003"); const damagedStatePath = path.join(damagedDirectory, "state.json"); const before = fs.readFileSync(damagedStatePath); const damagedState = JSON.parse(before);
     const files = { result: damagedState.resultPath, patch: damagedState.patchPath, validation: damagedState.validationLogPath, manifest: damagedState.manifestPath };
     const [action, evidence] = damage.split("-"); if (files[evidence]) action === "missing" ? fs.unlinkSync(files[evidence]) : fs.appendFileSync(files[evidence], "tamper\n");
@@ -431,7 +441,7 @@ test("done recovery is idempotent and validates retained patch, result, manifest
 
 test("waiting review recovery requires exact persisted patch and validation evidence", async () => {
   for (const damage of ["patch", "validation", "path", "incomplete"]) {
-    const root = repository(); const runner = createDeliveryRunner({ herdr: fakeHerdr(root).adapter, random: randomSequence() }); const input = contract(root); await runner.runTicket(input);
+    const root = repository(); const runner = createDeliveryRunner({ runDigest: TEST_RUN_DIGEST, herdr: fakeHerdr(root).adapter, random: randomSequence() }); const input = contract(root); await runner.runTicket(input);
     const directory = path.join(root, ".scratch/delivery/run-1/T003"); const statePath = path.join(directory, "state.json"); const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
     const promptPath = path.join(directory, `review-${state.round}-nonce2.prompt`); state.phase = "review_waiting"; state.promptPath = promptPath; state.promptSha256 = createHash("sha256").update(fs.readFileSync(promptPath)).digest("hex"); delete state.manifestPath; delete state.manifestSha256;
     if (damage === "patch") fs.appendFileSync(state.patchPath, "tamper\n");
@@ -446,7 +456,7 @@ test("waiting review recovery requires exact persisted patch and validation evid
 
 test("waiting review publication revalidates races and handles pre-existing manifests", async () => {
   const prepare = async (manifestMode = "absent") => {
-    const root = repository(); const runner = createDeliveryRunner({ herdr: fakeHerdr(root).adapter, random: randomSequence() }); const input = contract(root); const done = await runner.runTicket(input);
+    const root = repository(); const runner = createDeliveryRunner({ runDigest: TEST_RUN_DIGEST, herdr: fakeHerdr(root).adapter, random: randomSequence() }); const input = contract(root); const done = await runner.runTicket(input);
     const directory = path.join(root, ".scratch/delivery/run-1/T003"); const statePath = path.join(directory, "state.json"); const state = JSON.parse(fs.readFileSync(statePath, "utf8")); const manifestBytes = fs.readFileSync(state.manifestPath);
     const promptPath = path.join(directory, `review-${state.round}-nonce2.prompt`); state.phase = "review_waiting"; state.promptPath = promptPath; state.promptSha256 = createHash("sha256").update(fs.readFileSync(promptPath)).digest("hex"); delete state.resultSha256; delete state.manifestPath; delete state.manifestSha256;
     fs.writeFileSync(statePath, `${JSON.stringify(state)}\n`, { mode: 0o600 });
@@ -476,7 +486,7 @@ test("recovery validates identity and candidate hash, then consumes waiting stat
   const hash = "a".repeat(64);
   writeResult(review, { version: 1, verdict: "ok", findings: [], summary: "ok", candidateHash: hash });
   writeRecoveryState(directory, { version: 1, runId: "run-1", ticketId: "T003", phase: "review_waiting", target: "reviewer", resultPath: review, candidateHash: hash });
-  const runner = createDeliveryRunner({ herdr: fakeHerdr(root).adapter });
+  const runner = createDeliveryRunner({ runDigest: TEST_RUN_DIGEST, herdr: fakeHerdr(root).adapter });
   const recovered = await runner.recoverSettledResult(input, { expectedTarget: "reviewer", expectedKind: "review", expectedCandidateHash: hash });
   assert.equal(recovered.status, "recovered");
   assert.equal(JSON.parse(fs.readFileSync(path.join(directory, "state.json"), "utf8")).phase, "recovered");

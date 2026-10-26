@@ -33,6 +33,8 @@ test("models exact and directory-prefix ownership without glob guessing", () => 
 test("enforces lifecycle graph", () => {
   assert.ok(Object.isFrozen(LIFECYCLE_TRANSITIONS));
   assert.equal(validateLifecycleTransition("ready", "allocating"), "allocating");
+  assert.equal(validateLifecycleTransition("allocating", "active"), "active");
+  assert.throws(() => validateLifecycleTransition("allocating", "setting_up"), /unknown lifecycle/);
   assert.equal(validateLifecycleTransition("review", "needs_fix"), "needs_fix");
   assert.equal(validateLifecycleTransition("done", "awaiting_integration"), "awaiting_integration");
   assert.throws(() => validateLifecycleTransition("active", "done"), /invalid lifecycle/);
@@ -42,6 +44,7 @@ test("enforces lifecycle graph", () => {
 test("validates argv commands and control requests", () => {
   assert.deepEqual(validateCommandSpec({ executable: "node", args: ["--test", "test/x.mjs"], cwd: "repo" }), { executable: "node", args: ["--test", "test/x.mjs"], cwd: "repo" });
   assert.throws(() => validateCommandSpec({ executable: "sh", args: [], shell: true }), /only executable/);
+  assert.throws(() => validateCommandSpec({ executable: "node", args: [], setup: {} }), /only executable/);
   const request = { version: 1, requestId: "request-1", runId: "run-1", action: "stop", createdAt: "2026-01-01T00:00:00.000Z" };
   assert.deepEqual(validateControlRequest(request), request);
   assert.throws(() => validateControlRequest({ ...request, action: "exec" }), /action/);

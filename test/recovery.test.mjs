@@ -7,17 +7,19 @@ import { createScheduler, reconcileRunner } from "../extensions/lib/scheduler.mj
 
 function runtime(state) { const root = fs.mkdtempSync(path.join(os.tmpdir(), "recovery-")); fs.writeFileSync(path.join(root, "state.json"), JSON.stringify(state)); return root; }
 function schedulerState(ticket = {}) { return { version: 1, runId: "run-1", baseSha: "a".repeat(40), phase: "active", tickets: { T1: { status: "active", attempt: 1, agent: { name: "worker-run-1", pane: "w:p1" }, worktree: "/tmp/worktree", ...ticket } }, completedSteps: [], nextAction: "wait", updatedAt: "2026-01-01T00:00:00.000Z" }; }
-function scheduler(root, herdr = {}) { return createScheduler({ repositoryPath: root, runtimeDir: root, processRunner: { run: async () => ({ code: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) }) }, herdr, runTicket: async () => ({ status: "done" }), runnerOwner: { version: 1, pid: process.pid, processStart: "test-process", runId: "run-1", createdAt: "2026-01-01T00:00:00.000Z" } }); }
+function scheduler(root, herdr = {}) { return createScheduler({ repositoryPath: root, runtimeDir: root, processRunner: { run: async () => ({ code: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) }) }, herdr, runTicket: async () => ({ status: "done" }), runnerOwner: { version: 1, pid: process.pid, ownershipToken: "1111111111111111111111111111111111111111111111111111111111111111", runId: "run-1", createdAt: "2026-01-01T00:00:00.000Z" } }); }
 function request(root, value, filename = value.requestId) { const inbox = path.join(root, "inbox"); fs.mkdirSync(inbox, { recursive: true }); fs.writeFileSync(path.join(inbox, `${filename}.json`), JSON.stringify(value)); }
 
 test("runner reconciliation blocks live, unknown, and incomplete ownership", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "runner-owner-"));
   assert.equal(reconcileRunner(root).status, "available");
   fs.writeFileSync(path.join(root, "runner.lock"), "{}"); assert.equal(reconcileRunner(root).status, "blocked");
-  const owner = { version: 1, runId: "run-1", pid: 42, processStart: "start" }; fs.writeFileSync(path.join(root, "runner.lock"), JSON.stringify(owner)); fs.writeFileSync(path.join(root, "runner.json"), JSON.stringify(owner));
+  const owner = { version: 1, runId: "run-1", pid: 42, ownershipToken: "1111111111111111111111111111111111111111111111111111111111111111" }; fs.writeFileSync(path.join(root, "runner.lock"), JSON.stringify(owner)); fs.writeFileSync(path.join(root, "runner.json"), JSON.stringify(owner));
   assert.match(reconcileRunner(root, { isProcessAlive: () => true }).reason, /live/);
   assert.match(reconcileRunner(root).reason, /unknown/);
   assert.equal(reconcileRunner(root, { isProcessAlive: () => false }).status, "stale");
+  assert.equal(reconcileRunner(root, { isProcessAlive: (record) => record.pid === 42 && record.ownershipToken === "2222222222222222222222222222222222222222222222222222222222222222" }).status, "stale");
+  assert.match(reconcileRunner(root, { isProcessAlive: () => undefined }).reason, /unknown/);
 });
 
 test("recovery uses exact retained identity once and never replaces writer", async () => {

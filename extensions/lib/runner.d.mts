@@ -9,6 +9,8 @@ export type TicketRunContract = Readonly<{
   ticketId: string;
   planApproved: true;
   repositoryPath: string;
+  worktreeRoot: string;
+  worktreeRootIdentity: Readonly<{ path: string; dev: number; ino: number; mode: number; uid: number; gid: number }>;
   worktreePath: string;
   baseSha: string;
   branch: string;
@@ -24,7 +26,7 @@ export type TicketRunContract = Readonly<{
   artifactMappings: Readonly<Record<string, string>>;
 }>;
 export type ProcessResult = { code: number | null; signal?: NodeJS.Signals | null; timedOut?: boolean; outputLimit?: boolean; stdout: string | Buffer; stderr: string | Buffer };
-export interface ProcessRunner { run(spec: CommandSpec): Promise<ProcessResult>; }
+export interface ProcessRunner { run(spec: CommandSpec & { env?: NodeJS.ProcessEnv; timeoutMs?: number; maxOutputBytes?: number }): Promise<ProcessResult>; }
 export type TicketResult = Readonly<{
   ticketId: string;
   status: "done";
@@ -49,10 +51,11 @@ export const RESULT_PROTOCOL: "result-file-pointer";
 export function absentPathHash(file: string): string;
 export const REVIEW_TOOLS: readonly ["read", "grep", "find", "ls"];
 export function validateTicketRunContract(value: unknown): TicketRunContract;
-export function createProcessRunner(options?: { timeoutMs?: number; maxOutputBytes?: number }): ProcessRunner;
+export function createProcessRunner(options?: { timeoutMs?: number; maxOutputBytes?: number; env?: NodeJS.ProcessEnv }): ProcessRunner;
 export function createDeliveryRunner(options: {
   herdr: HerdrAdapter & { extractionVerdict?: string; resultProtocol?: string };
   processRunner?: ProcessRunner;
+  runDigest: string;
   clock?: () => Date;
   random?: () => string | number;
   notifier?: (message: { title: string; body: string; sound: "done" }) => void | Promise<void>;
