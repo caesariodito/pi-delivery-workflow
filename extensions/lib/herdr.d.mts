@@ -1,5 +1,7 @@
 export const HERDR_BASELINE_VERSION: "0.9.5";
 export const HERDR_PROTOCOL: 22;
+/** Maximum timeout accepted by one public Herdr adapter call. Longer deadlines require repeated calls. */
+export const HERDR_MAX_TIMEOUT_MS: 300000;
 export const EXTRACTION_VERDICT: "result-file-pointer";
 
 export class HerdrError extends Error {
@@ -22,6 +24,7 @@ export interface HerdrAdapterOptions {
   cwd?: string;
   env?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
+  /** Per-call timeout in milliseconds, from 1 through HERDR_MAX_TIMEOUT_MS. */
   timeoutMs?: number;
   maxOutputBytes?: number;
 }
@@ -36,6 +39,7 @@ export interface HerdrAdapter {
   worktreeRemove(options: { workspace: string; force?: boolean; trustRepository?: boolean }): Promise<JsonObject>;
   agentStart(options: { name: string; kind: string; pane: string; timeout?: number; agentArgs?: string[] }): Promise<JsonObject>;
   agentPrompt(options: { target: string; prompt: string; wait?: boolean; until?: AgentState[]; timeout?: number }): Promise<JsonObject>;
+  /** Wait once, for at most HERDR_MAX_TIMEOUT_MS milliseconds. Repeat calls for longer deadlines. */
   agentWait(options: { target: string; until?: AgentState[]; timeout?: number }): Promise<JsonObject>;
   agentGet(target: string): Promise<JsonObject>;
   agentRead(options: { target: string; source?: "visible" | "recent" | "recent-unwrapped" | "detection"; lines?: number; format?: "text" | "ansi" }): Promise<string>;

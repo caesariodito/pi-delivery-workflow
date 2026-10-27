@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 
 export const HERDR_BASELINE_VERSION = "0.9.5";
 export const HERDR_PROTOCOL = 22;
+export const HERDR_MAX_TIMEOUT_MS = 300_000;
 export const EXTRACTION_VERDICT = "result-file-pointer";
 
 // ponytail: 0.9.5/protocol 22 fixtures are synthetic contracts, not live recordings; require live captures before widening versions.
@@ -98,7 +99,7 @@ export function createHerdrAdapter({
 } = {}) {
   text(executable, "executable");
   if (!Array.isArray(executableArgs) || executableArgs.some((arg) => typeof arg !== "string")) throw new TypeError("executableArgs must be an array of strings");
-  positiveInteger(timeoutMs, "timeoutMs", 300_000);
+  positiveInteger(timeoutMs, "timeoutMs", HERDR_MAX_TIMEOUT_MS);
   positiveInteger(maxOutputBytes, "maxOutputBytes", 16 * 1024 * 1024);
 
   function execute(args, { timeout = timeoutMs, json = true } = {}) {
@@ -175,18 +176,18 @@ export function createHerdrAdapter({
     },
     async agentStart({ name, kind, pane, timeout = timeoutMs, agentArgs = [] }) {
       if (!Array.isArray(agentArgs) || agentArgs.some((arg) => typeof arg !== "string")) throw new TypeError("agentArgs must be an array of strings");
-      const herdrTimeout = positiveInteger(timeout, "timeout", 300_000);
+      const herdrTimeout = positiveInteger(timeout, "timeout", HERDR_MAX_TIMEOUT_MS);
       return execute(["agent", "start", identifier(name, "name"), "--kind", identifier(kind, "kind"), "--pane", identifier(pane, "pane"), "--timeout", String(herdrTimeout), ...(agentArgs.length ? ["--", ...agentArgs] : [])], { timeout: herdrTimeout + PROCESS_TIMEOUT_GRACE_MS });
     },
     async agentPrompt({ target, prompt, wait = false, until = [], timeout = timeoutMs }) {
       if (!Array.isArray(until) || until.some((state) => !["idle", "working", "blocked", "done", "unknown"].includes(state))) throw new TypeError("until contains an invalid agent state");
       if (until.length && !wait) throw new TypeError("until requires wait");
-      const herdrTimeout = positiveInteger(timeout, "timeout", 300_000);
+      const herdrTimeout = positiveInteger(timeout, "timeout", HERDR_MAX_TIMEOUT_MS);
       return execute(["agent", "prompt", identifier(target, "target"), text(prompt, "prompt"), ...(wait ? ["--wait"] : []), ...until.flatMap((state) => ["--until", state]), "--timeout", String(herdrTimeout)], { timeout: herdrTimeout + PROCESS_TIMEOUT_GRACE_MS });
     },
     async agentWait({ target, until = [], timeout = timeoutMs }) {
       if (!Array.isArray(until) || until.some((state) => !["idle", "working", "blocked", "done", "unknown"].includes(state))) throw new TypeError("until contains an invalid agent state");
-      const herdrTimeout = positiveInteger(timeout, "timeout", 300_000);
+      const herdrTimeout = positiveInteger(timeout, "timeout", HERDR_MAX_TIMEOUT_MS);
       return execute(["agent", "wait", identifier(target, "target"), ...until.flatMap((state) => ["--until", state]), "--timeout", String(herdrTimeout)], { timeout: herdrTimeout + PROCESS_TIMEOUT_GRACE_MS });
     },
     async agentGet(target) { return execute(["agent", "get", identifier(target, "target")]); },

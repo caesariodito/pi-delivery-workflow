@@ -10,6 +10,7 @@ import {
   checkCompatibility,
   EXTRACTION_VERDICT,
   HERDR_BASELINE_VERSION,
+  HERDR_MAX_TIMEOUT_MS,
   HERDR_PROTOCOL,
 } from "../extensions/lib/herdr.mjs";
 
@@ -38,6 +39,7 @@ test("child environment allowlists required context and excludes secrets", () =>
 test("pins Herdr baseline and refuses protocol mismatch", async () => {
   assert.equal(HERDR_BASELINE_VERSION, "0.9.5");
   assert.equal(HERDR_PROTOCOL, 22);
+  assert.equal(HERDR_MAX_TIMEOUT_MS, 300_000);
   assert.deepEqual(checkCompatibility("0.9.5", 22), { version: "0.9.5", protocol: 22, baseline: true });
   assert.throws(() => checkCompatibility("0.9.5", 23), { code: "protocol_mismatch" });
   assert.throws(() => checkCompatibility("0.9.7", 22), { code: "version_mismatch" });
@@ -88,8 +90,8 @@ test("wait and prompt preserve activity and blocked semantics", async () => {
   assert.equal(wait.event.agent_status, "blocked");
   assert.deepEqual(argv().at(-1), ["agent", "wait", "worker", "--until", "blocked", "--timeout", "2000"]);
   await assert.rejects(adapter.agentPrompt({ target: "worker", prompt: "task", until: ["done"] }), /until requires wait/);
-  await assert.rejects(adapter.agentPrompt({ target: "worker", prompt: "task", wait: true, timeout: 300001 }), /1 to 300000/);
-  await assert.rejects(adapter.agentWait({ target: "worker", timeout: 300001 }), /1 to 300000/);
+  await assert.rejects(adapter.agentPrompt({ target: "worker", prompt: "task", wait: true, timeout: HERDR_MAX_TIMEOUT_MS + 1 }), /1 to 300000/);
+  await assert.rejects(adapter.agentWait({ target: "worker", timeout: HERDR_MAX_TIMEOUT_MS + 1 }), /1 to 300000/);
 });
 
 test("rejects option-shaped identifiers asynchronously", async () => {
