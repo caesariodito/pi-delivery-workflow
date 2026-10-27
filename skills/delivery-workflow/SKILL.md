@@ -25,6 +25,16 @@ If finalized implementation-review artifacts exist, use their JSON as source and
 
 Tickets must include one goal, clear done criterion, dependencies, exact non-overlapping ownership, forbidden scope, explicit worker model/thinking/tools, executable/argv validation, and whether integrated dependency code is required.
 
+Use this model policy when assigning Delivery roles:
+
+- default auxiliary and research work: `9router/cx/gpt-5.6-sol`, `medium`;
+- scout/recon: `9router/cx/gpt-5.6-luna`, `low`;
+- implementation worker: `9router/cx/gpt-5.6-sol`, `medium`;
+- reviewer: `9router/cc/claude-opus-5-5`, `medium`;
+- oracle/advisor: `9router/cx/gpt-5.6-sol`, `high`.
+
+Keep thinking at or below `high`. Every executable ticket still carries its exact approved model and thinking values; no fallback is allowed.
+
 ## 3. Approve
 
 Present objective, tickets, dependencies, ownership, concurrency, models/tools, validation, worktree root, integration boundaries, and stop conditions. Obtain explicit implementation approval.
