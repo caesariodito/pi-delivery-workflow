@@ -9,7 +9,10 @@ function input() { return { runId: "run-1", objective: "Ship visible workflow", 
 ] }; }
 
 test("validates graph, ownership, cycles, and readiness", () => {
-  const run = validateRunInput(input());
+  const value = input(); value.tickets[0].validation.cwd = "."; value.tickets[0].worker.kind = "worker"; value.tickets[1].worker.kind = "reviewer";
+  const run = validateRunInput(value);
+  assert.equal(run.tickets[0].validation.cwd, ".");
+  assert.equal(run.tickets[0].worker.kind, "pi"); assert.equal(run.tickets[1].worker.kind, "pi");
   const states = { T1: { status: "pending" }, T2: { status: "pending" }, T3: { status: "pending" } };
   assert.deepEqual(readyTickets(run.tickets, states), ["T1", "T2"]);
   states.T1 = { status: "done", integrated: false }; states.T2 = { status: "done", integrated: false };
@@ -17,6 +20,7 @@ test("validates graph, ownership, cycles, and readiness", () => {
   states.T1.integrated = true; states.T2.integrated = true; assert.deepEqual(readyTickets(run.tickets, states), ["T3"]);
   const overlap = input(); overlap.tickets[1].ownedPaths = ["src/"]; assert.throws(() => validateRunInput(overlap), /overlaps/);
   const cycle = input(); cycle.tickets[0].dependencies = ["T3"]; assert.throws(() => validateRunInput(cycle), /cycle/);
+  const unsupported = input(); unsupported.tickets[0].worker.kind = "codex"; assert.throws(() => validateRunInput(unsupported), /must be pi, worker, or reviewer/);
 });
 
 test("parses porcelain v1 NUL renames with source and destination", () => {

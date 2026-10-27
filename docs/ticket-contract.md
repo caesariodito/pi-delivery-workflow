@@ -34,7 +34,9 @@ Rules:
 - Owned paths are normalized relative exact files or directory prefixes ending `/`.
 - Ownership does not overlap across tickets.
 - Validation is executable plus argv, never shell text.
-- Worker model, thinking, kind, and tools are explicit.
+- Worker model, thinking, role, and tools are explicit. `kind` accepts `pi`, `worker`, or `reviewer`; role aliases launch through Herdr kind `pi`.
+- Validation `cwd` is repository-relative; `.` means worktree root.
+- Run-level `contextPaths` must exist at launch. Ticket `specPaths` are checked when that ticket becomes ready, so dependencies may create later-ticket specs.
 - `requiresIntegratedBase: true` pauses dependent ticket until parent integration.
 - `false` allows textual dependency handoff without integration.
 

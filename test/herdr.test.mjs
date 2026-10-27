@@ -63,6 +63,7 @@ test("normalizes version, status, integration, worktree, agent, and notification
   const worktree = await adapter.worktreeCreate({ branch: "ticket;echo unsafe", base: "main", path: "/tmp/work tree", label: "Ticket", focus: false });
   assert.equal(worktree.path, "/tmp/work tree");
   assert.equal(worktree.pane, "w1:p1");
+  await adapter.worktreeRemove({ workspace: "w1" });
   await adapter.agentStart({ name: "worker", kind: "pi", pane: "w1:p1", agentArgs: ["--model", "name with spaces"] });
   const prompted = await adapter.agentPrompt({ target: "worker", prompt: "-do work; echo unsafe", wait: true, until: ["done", "blocked"], timeout: 1500 });
   assert.equal(prompted.type, "agent_prompted");
@@ -72,6 +73,7 @@ test("normalizes version, status, integration, worktree, agent, and notification
   assert.equal((await adapter.notify({ title: "Done", body: "Ticket done", sound: "done" })).type, "ok");
 
   assert.deepEqual(argv().find((entry) => entry[0] === "worktree" && entry[1] === "create"), ["worktree", "create", "--branch", "ticket;echo unsafe", "--base", "main", "--path", "/tmp/work tree", "--label", "Ticket", "--no-focus"]);
+  assert.ok(argv().some((entry) => entry.join("\0") === ["worktree", "remove", "--workspace", "w1"].join("\0")));
   assert.ok(argv().some((entry) => entry.join("\0") === ["agent", "prompt", "worker", "-do work; echo unsafe", "--wait", "--until", "done", "--until", "blocked", "--timeout", "1500"].join("\0")));
   assert.ok(argv().some((entry) => entry.join("\0") === ["agent", "read", "worker", "--source", "recent-unwrapped", "--lines", "120", "--format", "text"].join("\0")));
 });

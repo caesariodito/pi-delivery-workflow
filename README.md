@@ -37,7 +37,7 @@ Restart Pi or run `/reload`.
 After plan/ticket approval, call `delivery_start` with object fields:
 
 - `runId`, `objective`, exact `baseSha`;
-- absolute `worktreeRoot` outside repository;
+- normalized absolute `worktreeRoot` naming an existing real directory outside repository;
 - `contextPaths` referencing relevant approved files;
 - `maxConcurrency` from 1–8;
 - ticket array described in [ticket contract](docs/ticket-contract.md).

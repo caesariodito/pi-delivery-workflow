@@ -15,12 +15,17 @@ function relative(value, label, directory = false) {
   if (directory && !value.endsWith("/")) throw new TypeError(`${label} directory prefix must end with /.`);
   return value;
 }
+function validationCwd(value, label) { return value === "." ? value : relative(value, label); }
+function workerKind(value, label) {
+  if (!["pi", "worker", "reviewer"].includes(value)) throw new TypeError(`${label} must be pi, worker, or reviewer.`);
+  return "pi";
+}
 function command(value, label) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new TypeError(`${label} must be an object.`);
   const keys = Object.keys(value); if (keys.some((key) => !["executable", "args", "cwd"].includes(key))) throw new TypeError(`${label} has unknown properties.`);
   const executable = text(value.executable, `${label}.executable`, 1024);
   if (!Array.isArray(value.args) || value.args.length > 256 || value.args.some((arg) => typeof arg !== "string" || arg.length > 8192 || arg.includes("\0"))) throw new TypeError(`${label}.args is invalid.`);
-  return Object.freeze({ executable, args: Object.freeze([...value.args]), ...(value.cwd ? { cwd: relative(value.cwd, `${label}.cwd`) } : {}) });
+  return Object.freeze({ executable, args: Object.freeze([...value.args]), ...(value.cwd ? { cwd: validationCwd(value.cwd, `${label}.cwd`) } : {}) });
 }
 function overlaps(left, right) {
   const a = left.endsWith("/") ? left : `${left}/`; const b = right.endsWith("/") ? right : `${right}/`;
@@ -47,7 +52,7 @@ export function validateTicketGraph(value) {
       dependencies: Object.freeze(raw.dependencies.map((item) => id(item, `${ticketId}.dependency`))),
       ownedPaths: Object.freeze(raw.ownedPaths.map((item) => relative(item, `${ticketId}.ownedPath`, item.endsWith("/")))),
       forbiddenScope: text(raw.forbiddenScope ?? "Everything outside owned paths.", `${ticketId}.forbiddenScope`),
-      worker: Object.freeze({ name: agentName(worker.name, `${ticketId}.worker.name`), kind: id(worker.kind, `${ticketId}.worker.kind`), model: text(worker.model, `${ticketId}.worker.model`, 256), thinking: text(worker.thinking, `${ticketId}.worker.thinking`, 32), tools: Object.freeze(worker.tools.map((item) => id(item, `${ticketId}.worker.tool`))) }),
+      worker: Object.freeze({ name: agentName(worker.name, `${ticketId}.worker.name`), kind: workerKind(worker.kind, `${ticketId}.worker.kind`), model: text(worker.model, `${ticketId}.worker.model`, 256), thinking: text(worker.thinking, `${ticketId}.worker.thinking`, 32), tools: Object.freeze(worker.tools.map((item) => id(item, `${ticketId}.worker.tool`))) }),
       validation: command(raw.validation, `${ticketId}.validation`),
       requiresIntegratedBase: raw.requiresIntegratedBase !== false,
       specPaths: Object.freeze((raw.specPaths ?? []).map((item) => relative(item, `${ticketId}.specPath`))),

@@ -166,7 +166,11 @@ export function createHerdrAdapter({
         ...result,
         path: result.path ?? result.worktree?.path ?? result.workspace?.worktree?.checkout_path,
         pane: result.pane ?? result.root_pane?.pane_id,
+        workspace: result.workspace_id ?? result.workspace?.workspace_id ?? result.workspace?.id,
       };
+    },
+    async worktreeRemove({ workspace, force = false, trustRepository = false } = {}) {
+      return execute(["worktree", "remove", "--workspace", identifier(workspace, "workspace"), ...(force ? ["--force"] : []), ...(trustRepository ? ["--trust-repository"] : [])]);
     },
     async agentStart({ name, kind, pane, timeout = timeoutMs, agentArgs = [] }) {
       if (!Array.isArray(agentArgs) || agentArgs.some((arg) => typeof arg !== "string")) throw new TypeError("agentArgs must be an array of strings");

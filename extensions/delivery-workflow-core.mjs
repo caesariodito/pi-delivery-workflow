@@ -26,16 +26,18 @@ function contextFilesExist(repositoryPath, paths) { for (const item of paths) { 
 function parseAgentState(value) { return value?.agent?.agent_status ?? value?.agent?.status ?? value?.agent?.state ?? value?.event?.agent_status ?? value?.status ?? value?.state ?? "unknown"; }
 
 async function verifyRepository(repositoryPath, baseSha, worktreeRoot, herdr) {
+  const root = fs.realpathSync(repositoryPath);
+  if (!path.isAbsolute(worktreeRoot) || path.normalize(worktreeRoot) !== worktreeRoot) throw new Error("worktreeRoot must be a normalized absolute path to an existing real directory outside the repository.");
+  let worktreeReal; let stat;
+  try { worktreeReal = fs.realpathSync(worktreeRoot); stat = fs.lstatSync(worktreeRoot); } catch { throw new Error("worktreeRoot must be a normalized absolute path to an existing real directory outside the repository."); }
+  if (!stat.isDirectory() || stat.isSymbolicLink() || worktreeReal === root || worktreeReal.startsWith(`${root}${path.sep}`)) throw new Error("worktreeRoot must be a normalized absolute path to an existing real directory outside the repository.");
   if (process.env.HERDR_ENV !== "1") throw new Error("HERDR_ENV=1 is required.");
   await herdr.status(); const integrations = await herdr.integrationStatus(); if (!integrations.some((entry) => entry.name === "pi" && entry.status.startsWith("current (v"))) throw new Error("Herdr Pi integration is not current.");
-  const root = fs.realpathSync(repositoryPath); const top = (await git(root, ["rev-parse", "--show-toplevel"])).trim();
+  const top = (await git(root, ["rev-parse", "--show-toplevel"])).trim();
   if (fs.realpathSync(top) !== root) throw new Error("cwd must be repository root.");
   if ((await git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])).length) throw new Error("parent checkout must be clean.");
   const resolved = (await git(root, ["rev-parse", "--verify", `${baseSha}^{commit}`])).trim(); if (resolved !== baseSha) throw new Error("baseSha must be exact immutable commit.");
   await git(root, ["check-ignore", "-q", ".scratch/"]);
-  if (!path.isAbsolute(worktreeRoot) || path.normalize(worktreeRoot) !== worktreeRoot) throw new Error("worktreeRoot must be normalized and absolute.");
-  fs.mkdirSync(worktreeRoot, { recursive: true, mode: 0o700 }); const worktreeReal = fs.realpathSync(worktreeRoot); const stat = fs.lstatSync(worktreeRoot);
-  if (!stat.isDirectory() || stat.isSymbolicLink() || worktreeReal === root || worktreeReal.startsWith(`${root}${path.sep}`)) throw new Error("worktreeRoot must be a real directory outside repository.");
   return root;
 }
 
@@ -46,6 +48,7 @@ function handoff(ticket, runtime, worktreePath, branch, agentResult, validation,
 
 export function createDeliveryWorkflowCore({ herdr = createHerdrAdapter({ env: buildChildEnvironment() }), nonce = () => randomBytes(24).toString("hex") } = {}) {
   async function executeTicket(repositoryPath, directory, run, ticket, state, worktreeRoot) {
+    contextFilesExist(repositoryPath, ticket.specPaths);
     const ticketDir = path.join(directory, "tickets", ticket.id); fs.mkdirSync(ticketDir, { recursive: true, mode: 0o700 });
     const worktreePath = path.join(worktreeRoot, `${run.runId}-${ticket.id}`); const branch = `delivery/${run.runId}-${ticket.id}`;
     const created = await herdr.worktreeCreate({ cwd: repositoryPath, branch, base: run.baseSha, path: worktreePath, label: `${run.runId} ${ticket.id}`, focus: false });
@@ -56,7 +59,14 @@ export function createDeliveryWorkflowCore({ herdr = createHerdrAdapter({ env: b
     fs.mkdirSync(path.dirname(promptPath), { recursive: true, mode: 0o700 }); fs.mkdirSync(path.dirname(resultPath), { recursive: true, mode: 0o700 }); fs.writeFileSync(promptPath, packet, { mode: 0o600, flag: "wx" });
     const target = ticket.worker.name; const tools = [...new Set([...ticket.worker.tools, RESULT_TOOL])];
     state.tickets[ticket.id] = { status: "running", target, pane: created.pane, worktreePath, branch, promptPath, resultPath, startedAt: new Date().toISOString() }; save(directory, state);
-    await herdr.agentStart({ name: target, kind: ticket.worker.kind, pane: created.pane, timeout: 300_000, agentArgs: ["--model", ticket.worker.model, "--thinking", ticket.worker.thinking, "--extension", RESULT_EXTENSION, "--delivery-result-path", resultPath, "--delivery-result-nonce", ticketNonce, "--tools", tools.join(",")] });
+    try {
+      await herdr.agentStart({ name: target, kind: ticket.worker.kind, pane: created.pane, timeout: 300_000, agentArgs: ["--model", ticket.worker.model, "--thinking", ticket.worker.thinking, "--extension", RESULT_EXTENSION, "--delivery-result-path", resultPath, "--delivery-result-nonce", ticketNonce, "--tools", tools.join(",")] });
+    } catch (error) {
+      const workspace = created.workspace ?? created.pane.split(":", 1)[0];
+      try { await herdr.worktreeRemove({ workspace }); }
+      catch (cleanupError) { throw new Error(`${error instanceof Error ? error.message : String(error)}; pre-agent cleanup failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`); }
+      throw new Error(`${error instanceof Error ? error.message : String(error)}; newly created worktree/workspace removed before approval-bound work began`);
+    }
     const promptResult = await herdr.agentPrompt({ target, prompt: `Read and follow the complete ticket context at ${promptPath}. Call ${RESULT_TOOL} exactly once when settled.`, wait: true, timeout: 300_000 });
     let status = parseAgentState(promptResult);
     if (status === "unknown" || !fs.existsSync(resultPath)) { const live = await herdr.agentGet(target); status = parseAgentState(live); }
@@ -74,7 +84,7 @@ export function createDeliveryWorkflowCore({ herdr = createHerdrAdapter({ env: b
   }
 
   async function run(repositoryPath, input, existing = false) {
-    const run = validateRunInput(input); const root = await verifyRepository(repositoryPath, run.baseSha, input.worktreeRoot, herdr); contextFilesExist(root, [...run.contextPaths, ...run.tickets.flatMap((ticket) => ticket.specPaths)]);
+    const run = validateRunInput(input); const root = await verifyRepository(repositoryPath, run.baseSha, input.worktreeRoot, herdr); contextFilesExist(root, run.contextPaths);
     const directory = runDir(root, run.runId); if (!existing) { fs.mkdirSync(path.dirname(directory), { recursive: true, mode: 0o700 }); fs.mkdirSync(directory, { recursive: false, mode: 0o700 }); atomicJson(path.join(directory, "run.json"), { ...run, worktreeRoot: input.worktreeRoot, createdAt: new Date().toISOString() }); }
     const state = existing ? readJson(statePath(directory)) : { version: 1, runId: run.runId, baseSha: run.baseSha, phase: "running", tickets: Object.fromEntries(run.tickets.map((ticket) => [ticket.id, { status: "pending" }])), guidance: {}, updatedAt: new Date().toISOString() };
     active.set(directory, { state, run });
@@ -93,7 +103,7 @@ export function createDeliveryWorkflowCore({ herdr = createHerdrAdapter({ env: b
 
   return Object.freeze({
     async start(repositoryPath, input) { const state = await run(repositoryPath, input, false); return result(`Delivery ${input.runId}: ${state.phase}.`, state, state.phase === "blocked"); },
-    async status(repositoryPath, input) { const directory = runDir(repositoryPath, input.runId); if (!fs.existsSync(statePath(directory))) return result(`Run ${input.runId} not found.`, { status: "not_found" }, true); return result(`Delivery ${input.runId}: ${readJson(statePath(directory)).phase}.`, readJson(statePath(directory))); },
+    async status(repositoryPath, input) { const directory = runDir(repositoryPath, input.runId); if (!fs.existsSync(statePath(directory))) return result(`Run ${input.runId} not found.`, { status: "not_found" }, true); const state = readJson(statePath(directory)); const reasons = Object.entries(state.tickets ?? {}).filter(([, ticket]) => ticket.reason).map(([ticketId, ticket]) => `${ticketId}: ${ticket.reason}`); return result(`Delivery ${input.runId}: ${state.phase}.${reasons.length ? ` ${reasons.join("; ")}` : ""}`, state); },
     async steer(repositoryPath, input) { const directory = runDir(repositoryPath, input.runId); const running = active.get(directory); if (!running) return result("Run is not active in this Pi process; inspect Herdr and start a new supervised run if needed.", { status: "not_active" }, true); const ticket = running.state.tickets[safeId(input.ticketId, "ticketId")]; if (ticket?.status !== "running" || !ticket.target) return result("Ticket has no active target.", { status: "not_active" }, true); const liveState = parseAgentState(await herdr.agentGet(ticket.target)); if (liveState !== "working") return result(`Ticket agent is ${liveState}; guidance not sent.`, { status: "not_active", agentState: liveState }, true); await herdr.agentPrompt({ target: ticket.target, prompt: input.message, wait: false, timeout: 30_000 }); return result("Guidance sent; delivery is not proof of compliance.", { status: "sent", target: ticket.target }); },
     async stop(repositoryPath, input) { const directory = runDir(repositoryPath, input.runId); const running = active.get(directory); const state = fs.existsSync(statePath(directory)) ? readJson(statePath(directory)) : null; const targets = input.ticketId ? [state?.tickets?.[input.ticketId]].filter((ticket) => ticket?.status === "running") : Object.values(state?.tickets ?? {}).filter((ticket) => ticket.status === "running"); if (!targets.length) return result("No active recorded ticket target.", { status: "not_active" }, true); for (const ticket of targets) if (ticket.target) await herdr.agentSendKeys({ target: ticket.target, keys: ["ctrl+c"] }); if (running) { running.state.stopRequested = true; running.state.nextAction = "Wait for active batch to settle; no new tickets will launch."; save(directory, running.state); } return result("Stop requested. No new batch will launch; pane/worktree retained.", { status: "stop_requested", targets: targets.map((ticket) => ticket.target) }); },
     async continue(repositoryPath, input) { const directory = runDir(repositoryPath, input.runId); if (active.has(directory)) return result("Run is already active.", { status: "active" }, true); const savedRun = readJson(path.join(directory, "run.json")); const state = readJson(statePath(directory)); if (state.phase !== "awaiting_integration") return result("Run is not awaiting integration.", { status: state.phase }, true); const root = fs.realpathSync(repositoryPath); if (input.integratedSha === state.baseSha || (await git(root, ["rev-parse", "HEAD"])).trim() !== input.integratedSha || (await git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])).length) return result("Integrated SHA must be a new clean current parent HEAD.", { status: "blocked" }, true); try { await git(root, ["merge-base", "--is-ancestor", state.baseSha, input.integratedSha]); } catch { return result("Integrated SHA must descend from prior base SHA.", { status: "blocked" }, true); } for (const ticket of Object.values(state.tickets)) if (ticket.status === "done") ticket.integrated = true; savedRun.baseSha = input.integratedSha; state.baseSha = input.integratedSha; state.phase = "running"; save(directory, state); atomicJson(path.join(directory, "run.json"), savedRun); const next = await run(root, savedRun, true); return result(`Delivery ${input.runId}: ${next.phase}.`, next, next.phase === "blocked"); },
