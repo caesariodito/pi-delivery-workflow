@@ -157,6 +157,7 @@ export function createHerdrAdapter({
         return { name: match[1], status: match[2], path: match[3] ?? null };
       });
     },
+    async workspaceList() { return execute(["workspace", "list"]); },
     async worktreeList({ workspace, cwd: worktreeCwd, trustRepository = false } = {}) {
       return execute(["worktree", "list", ...(workspace ? ["--workspace", identifier(workspace, "workspace")] : []), ...(worktreeCwd ? ["--cwd", text(worktreeCwd, "cwd")] : []), ...(trustRepository ? ["--trust-repository"] : [])]);
     },

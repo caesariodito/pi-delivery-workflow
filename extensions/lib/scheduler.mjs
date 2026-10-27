@@ -77,12 +77,15 @@ export function validateRunInput(value) {
   return Object.freeze({ runId: value.runId, objective: value.objective, baseSha: value.baseSha, tickets: validateTicketGraph(value.tickets), maxConcurrency: value.maxConcurrency ?? 4, contextPaths: Object.freeze((value.contextPaths ?? []).map((item) => relative(item, "contextPath"))) });
 }
 
+function validated(state) { return ["validation_passed", "integrated", "cleaned"].includes(state?.status); }
+function integrated(state) { return ["integrated", "cleaned"].includes(state?.status); }
+
 export function readyTickets(tickets, states) {
-  return tickets.filter((ticket) => (states[ticket.id]?.status ?? "pending") === "pending" && ticket.dependencies.every((dependency) => states[dependency]?.status === "done") && (!ticket.requiresIntegratedBase || ticket.dependencies.every((dependency) => states[dependency]?.integrated === true))).map((ticket) => ticket.id);
+  return tickets.filter((ticket) => (states[ticket.id]?.status ?? "pending") === "pending" && ticket.dependencies.every((dependency) => validated(states[dependency])) && (!ticket.requiresIntegratedBase || ticket.dependencies.every((dependency) => integrated(states[dependency])))).map((ticket) => ticket.id);
 }
 
 export function blockedByIntegration(tickets, states) {
-  return tickets.some((ticket) => (states[ticket.id]?.status ?? "pending") === "pending" && ticket.dependencies.every((dependency) => states[dependency]?.status === "done") && ticket.requiresIntegratedBase && ticket.dependencies.some((dependency) => states[dependency]?.integrated !== true));
+  return tickets.some((ticket) => (states[ticket.id]?.status ?? "pending") === "pending" && ticket.dependencies.every((dependency) => validated(states[dependency])) && ticket.requiresIntegratedBase && ticket.dependencies.some((dependency) => !integrated(states[dependency])));
 }
 
 export function parsePorcelainV1Z(value) {
