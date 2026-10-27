@@ -33,6 +33,16 @@ test("scoped result tool writes ticket result once", async () => {
   assert.equal(JSON.parse(fs.readFileSync(destination)).ticketId, "T1"); assert.throws(() => fs.writeFileSync(destination, "again", { flag: "wx" }));
 });
 
+test("scoped result tool advances once through parent-owned round binding", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "delivery-result-round-")); const destination = path.join(root, "T1.json"); const bindingDir = path.join(root, "bindings"); fs.mkdirSync(bindingDir);
+  fs.writeFileSync(path.join(bindingDir, "round-0.json"), JSON.stringify({ version: 1, round: 0, ticketId: "T1", nonce: "nonce-0", resultPath: destination }));
+  const pi = fakePi(); pi.flags.set("delivery-result-path", destination); pi.flags.set("delivery-result-nonce", "nonce-0"); pi.flags.set("delivery-result-binding-dir", bindingDir); deliveryResultTool(pi); const tool = pi.tools.get("delivery_result_write");
+  const input = { ticketId: "T1", status: "done", summary: "done", changedPaths: ["src/a.js"], validation: "passed", handoff: "exports A", question: null };
+  await tool.execute("initial", { nonce: "nonce-0", ...input }); const repair = path.join(root, "T1.fix-1.json"); fs.writeFileSync(path.join(bindingDir, "round-1.json"), JSON.stringify({ version: 1, round: 1, ticketId: "T1", nonce: "nonce-1", resultPath: repair }));
+  await tool.execute("repair", { nonce: "nonce-1", ...input }); assert.equal(JSON.parse(fs.readFileSync(repair)).ticketId, "T1"); await assert.rejects(tool.execute("arbitrary", { nonce: "wrong", ...input }), /nonce mismatch/);
+  fs.writeFileSync(path.join(bindingDir, "round-2.json"), "{}"); await assert.rejects(tool.execute("third", { nonce: "nonce-2", ...input }), /binding set is invalid/);
+});
+
 test("launch defers dependent spec checks and removes worktree when agent start fails", async () => {
   const fixture = repository(); const calls = [];
   const herdr = { async status() {}, async integrationStatus() { return [{ name: "pi", status: "current (v1)" }]; }, async worktreeCreate({ path: worktreePath }) { calls.push("create"); return { path: worktreePath, pane: "w1:p1", workspace: "w1" }; }, async agentStart({ kind }) { assert.equal(kind, "pi"); throw new Error("agent launch failed"); }, async worktreeRemove({ workspace }) { calls.push(`remove:${workspace}`); } };
