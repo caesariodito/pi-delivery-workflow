@@ -40,16 +40,18 @@ test("launch defers dependent spec checks and removes worktree when agent start 
   finally { if (previous === undefined) delete process.env.HERDR_ENV; else process.env.HERDR_ENV = previous; }
 });
 
-test("launch waits for interactive idle readiness before submitting ticket prompt", async () => {
+test("launch passes ticket as Pi initial prompt instead of terminal input", async () => {
   const fixture = repository(); const calls = []; let polls = 0;
   const herdr = {
     async status() {}, async integrationStatus() { return [{ name: "pi", status: "current (v1)" }]; },
-    async worktreeCreate({ path: worktreePath }) { return { path: worktreePath, pane: "w1:p1", workspace: "w1" }; }, async agentStart() { calls.push("start"); },
-    async agentGet() { polls += 1; calls.push(`get:${polls}`); return { agent: { agent_status: "idle", interactive_ready: polls > 1 } }; },
-    async agentPrompt() { calls.push("prompt"); throw new Error("stop after prompt"); },
+    async worktreeCreate({ path: worktreePath }) { return { path: worktreePath, pane: "w1:p1", workspace: "w1" }; },
+    async agentStart({ agentArgs }) { calls.push("start"); const separator = agentArgs.lastIndexOf("--"); assert.ok(separator > 0); assert.match(agentArgs[separator + 1], /Read and follow the complete ticket context/); },
+    async agentGet() { polls += 1; calls.push(`get:${polls}`); return { agent: { agent_status: polls > 1 ? "working" : "idle", interactive_ready: true } }; },
+    async agentWait() { calls.push("wait"); throw new Error("stop after wait"); },
+    async agentPrompt() { assert.fail("initial ticket must not use terminal prompt injection"); },
   };
   const previous = process.env.HERDR_ENV; process.env.HERDR_ENV = "1";
-  try { const output = await createDeliveryWorkflowCore({ herdr }).start(fixture.root, runInput(fixture.sha, fixture.worktreeRoot)); assert.match(output.details.tickets.T1.reason, /stop after prompt/); assert.deepEqual(calls, ["start", "get:1", "get:2", "prompt"]); }
+  try { const output = await createDeliveryWorkflowCore({ herdr }).start(fixture.root, runInput(fixture.sha, fixture.worktreeRoot)); assert.match(output.details.tickets.T1.reason, /stop after wait/); assert.deepEqual(calls, ["start", "get:1", "get:2", "wait"]); }
   finally { if (previous === undefined) delete process.env.HERDR_ENV; else process.env.HERDR_ENV = previous; }
 });
 
