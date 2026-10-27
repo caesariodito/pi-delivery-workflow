@@ -6,9 +6,10 @@
 - Ticket ownership is exact file or directory-prefix scope and cannot overlap.
 - Commands use executable plus argv with `shell: false`.
 - Models and tools are explicit; no fallback.
-- Actual changes come from Git evidence.
-- Unknown Herdr state, missing result, ownership violation, or failed validation blocks.
-- Parent owns integration, cleanup, publication, and destructive actions.
+- Actual changes come from Git evidence; successful validation persists a binary patch and SHA-256 digest.
+- Exact reverse application at clean parent HEAD proves per-ticket integration; ancestry alone does not.
+- Unknown Herdr state, missing result, ownership violation, failed validation, or evidence mismatch blocks.
+- Parent owns integration, explicit cleanup invocation, publication, and other destructive actions.
 
 ## Interruption model
 
@@ -26,4 +27,6 @@ If Pi or attached workflow exits:
 
 ## Retention
 
-Done, blocked, failed, and stopped tickets keep worktrees and panes. Cleanup requires explicit operator action after inspection. Package performs no reset, stash, branch deletion, worktree removal, pane close, merge, push, publish, deploy, or release.
+`validation_passed`, blocked, failed, stopped, active, unknown, and legacy tickets keep worktrees and panes. Explicit `delivery_cleanup` removes only exact integrated, inactive, identity-matched Herdr worktrees and records `cleaned`; it preserves branches and all runtime evidence. Package performs no reset, stash, branch deletion, automatic cleanup, pane-only close, merge, patch application, push, publish, deploy, or release.
+
+Cleanup retries are safe only after a recorded pre-removal failure. A removal-success/state-write-failure is ambiguous: inspect live Herdr state and preserved patch/integration evidence manually. Do not replay.

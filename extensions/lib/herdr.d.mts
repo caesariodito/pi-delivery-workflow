@@ -30,6 +30,7 @@ export interface HerdrAdapter {
   version(): Promise<string>;
   status(): Promise<{ client: JsonObject; server: JsonObject; update: unknown; compatibility: { version: string; protocol: number; baseline: boolean } }>;
   integrationStatus(options?: { outdatedOnly?: boolean }): Promise<Array<{ name: string; status: string; path: string | null }>>;
+  workspaceList(): Promise<JsonObject>;
   worktreeList(options?: { workspace?: string; cwd?: string; trustRepository?: boolean }): Promise<JsonObject>;
   worktreeCreate(options?: { workspace?: string; cwd?: string; branch?: string; base?: string; path?: string; label?: string; focus?: boolean; trustRepository?: boolean }): Promise<JsonObject>;
   worktreeRemove(options: { workspace: string; force?: boolean; trustRepository?: boolean }): Promise<JsonObject>;

@@ -22,7 +22,8 @@ function runInput(sha, worktreeRoot) { return { runId: "run-1", objective: "Test
 
 test("registers thin supervised tool surface", () => {
   const pi = fakePi(); deliveryWorkflow(pi);
-  assert.deepEqual([...pi.tools.keys()].sort(), ["delivery_continue", "delivery_start", "delivery_status", "delivery_steer", "delivery_stop"]);
+  assert.deepEqual([...pi.tools.keys()].sort(), ["delivery_cleanup", "delivery_continue", "delivery_start", "delivery_status", "delivery_steer", "delivery_stop"]);
+  assert.deepEqual(pi.tools.get("delivery_cleanup").annotations, { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false });
   assert.equal(pi.commands.has("delivery"), true); assert.equal(pi.tools.has("delivery_recover"), false); assert.equal(pi.tools.has("delivery_reply"), false); assert.equal(pi.tools.has("delivery_review"), false);
 });
 
@@ -59,6 +60,29 @@ test("worktree root diagnostics run before Herdr launch checks", async () => {
   const fixture = repository(); let checked = false; const herdr = { async status() { checked = true; } }; const previous = process.env.HERDR_ENV; process.env.HERDR_ENV = "1";
   try { await assert.rejects(createDeliveryWorkflowCore({ herdr }).start(fixture.root, runInput(fixture.sha, path.join(fixture.root, "missing"))), /existing real directory outside the repository/); assert.equal(checked, false); }
   finally { if (previous === undefined) delete process.env.HERDR_ENV; else process.env.HERDR_ENV = previous; }
+});
+
+test("captures exact patch, verifies integration, and cleans idempotently", async () => {
+  const fixture = repository(); const calls = []; let worktreePath; let failRemoval = true; const input = runInput(fixture.sha, fixture.worktreeRoot); input.tickets = [input.tickets[0]];
+  const herdr = {
+    async status() {}, async integrationStatus() { return [{ name: "pi", status: "current (v1)" }]; },
+    async worktreeCreate({ path: createdPath }) { worktreePath = createdPath; execFileSync("git", ["worktree", "add", "--detach", createdPath, fixture.sha], { cwd: fixture.root }); return { path: createdPath, pane: "w1:p1", workspace: "w1" }; },
+    async agentStart({ agentArgs }) { fs.writeFileSync(path.join(worktreePath, "a.txt"), "accepted\n"); const resultPath = agentArgs[agentArgs.indexOf("--delivery-result-path") + 1]; fs.mkdirSync(path.dirname(resultPath), { recursive: true }); fs.writeFileSync(resultPath, JSON.stringify({ version: 1, ticketId: "T1", status: "done", summary: "done", changedPaths: ["a.txt"], validation: "passed", handoff: "adds a", question: null })); },
+    async agentGet() { return { agent: { agent_status: "done" } }; },
+    async workspaceList() { return { workspaces: [{ workspace_id: "w1", agent_status: "idle", worktree: { checkout_path: worktreePath } }] }; },
+    async worktreeRemove({ workspace, force }) { calls.push([workspace, force]); if (failRemoval) throw new Error("fixture removal failed"); execFileSync("git", ["worktree", "remove", "--force", worktreePath], { cwd: fixture.root }); return { type: "worktree_removed" }; },
+  };
+  const previous = process.env.HERDR_ENV; process.env.HERDR_ENV = "1";
+  try {
+    const core = createDeliveryWorkflowCore({ herdr }); const started = await core.start(fixture.root, input); assert.equal(started.details.tickets?.T1.status, "validation_passed", started.content[0].text);
+    const patch = fs.readFileSync(path.join(fixture.root, ".scratch", "delivery", "run-1", "patches", "T1.patch")); assert.match(patch.toString(), /a\.txt/); assert.equal(started.details.tickets.T1.patchEvidence.sha256.length, 64);
+    const refused = await core.cleanup(fixture.root, { runId: "run-1" }); assert.deepEqual(refused.details.cleaned, []); assert.match(refused.details.retained[0].reason, /validation_passed/);
+    fs.writeFileSync(path.join(fixture.root, "a.txt"), "accepted\n"); execFileSync("git", ["add", "a.txt"], { cwd: fixture.root }); execFileSync("git", ["commit", "-qm", "integrate"], { cwd: fixture.root }); const integratedSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: fixture.root, encoding: "utf8" }).trim();
+    const continued = await core.continue(fixture.root, { runId: "run-1", integratedSha }); assert.equal(continued.details.tickets?.T1.status, "integrated", continued.content[0].text); assert.equal(continued.details.phase, "awaiting_cleanup");
+    const partial = await core.cleanup(fixture.root, { runId: "run-1" }); assert.equal(partial.details.status, "partial"); assert.match(partial.details.retained[0].reason, /fixture removal failed/); assert.equal(partial.isError, true);
+    failRemoval = false; const cleaned = await core.cleanup(fixture.root, { runId: "run-1" }); assert.deepEqual(cleaned.details.cleaned, ["T1"]); assert.deepEqual(calls, [["w1", true], ["w1", true]]);
+    const repeated = await core.cleanup(fixture.root, { runId: "run-1" }); assert.deepEqual(repeated.details.alreadyCleaned, ["T1"]); assert.deepEqual(calls, [["w1", true], ["w1", true]]);
+  } finally { if (previous === undefined) delete process.env.HERDR_ENV; else process.env.HERDR_ENV = previous; }
 });
 
 test("status reports persisted ticket reasons and inactive controls stay inspection-only", async () => {

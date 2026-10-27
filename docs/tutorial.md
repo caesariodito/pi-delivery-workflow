@@ -53,4 +53,10 @@ Blocked, failed, unknown, timeout, or interrupted work remains visible and retai
 
 ## 7. Finish
 
-Parent performs acceptance and any integration. Cleanup, merge, push, publish, deploy, and release remain separate explicit actions.
+Parent performs acceptance and integrates exact validated patches. Check status, then explicitly remove all eligible integrated worktrees:
+
+```text
+/delivery_cleanup {"runId":"key-rotation"}
+```
+
+Cleanup preserves branches and `.scratch/` evidence. Automatic cleanup, merge, push, publish, deploy, and release remain excluded.

@@ -59,6 +59,7 @@ test("normalizes version, status, integration, worktree, agent, and notification
     { name: "pi", status: "current (v9)", path: "/tmp/pi integration" },
     { name: "codex", status: "not installed", path: "/tmp/codex" },
   ]);
+  await adapter.workspaceList();
   await adapter.worktreeList({ cwd: "/tmp/repo path" });
   const worktree = await adapter.worktreeCreate({ branch: "ticket;echo unsafe", base: "main", path: "/tmp/work tree", label: "Ticket", focus: false });
   assert.equal(worktree.path, "/tmp/work tree");
@@ -72,6 +73,7 @@ test("normalizes version, status, integration, worktree, agent, and notification
   assert.equal((await adapter.agentSendKeys({ target: "worker", keys: ["esc", "ctrl+c"] })).type, "ok");
   assert.equal((await adapter.notify({ title: "Done", body: "Ticket done", sound: "done" })).type, "ok");
 
+  assert.ok(argv().some((entry) => entry.join("\0") === ["workspace", "list"].join("\0")));
   assert.deepEqual(argv().find((entry) => entry[0] === "worktree" && entry[1] === "create"), ["worktree", "create", "--branch", "ticket;echo unsafe", "--base", "main", "--path", "/tmp/work tree", "--label", "Ticket", "--no-focus"]);
   assert.ok(argv().some((entry) => entry.join("\0") === ["worktree", "remove", "--workspace", "w1"].join("\0")));
   assert.ok(argv().some((entry) => entry.join("\0") === ["agent", "prompt", "worker", "-do work; echo unsafe", "--wait", "--until", "done", "--until", "blocked", "--timeout", "1500"].join("\0")));

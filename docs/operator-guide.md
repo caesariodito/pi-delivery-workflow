@@ -36,6 +36,7 @@ For each ticket, inspect:
 - result JSON;
 - validation log;
 - concise handoff;
+- immutable patch and digest metadata;
 - Git changes.
 
 Persisted status is inspection aid. Herdr is live process authority.
@@ -49,7 +50,7 @@ When run pauses at `awaiting_integration`:
 3. commit;
 4. call `delivery_continue` with current clean HEAD SHA.
 
-Package marks completed dependencies integrated and launches next ready tickets from supplied base. It does not apply patches or commits.
+Package rehashes each persisted patch and requires exact reverse applicability at clean current parent HEAD. Only then does it mark tickets `integrated` and launch next ready tickets from supplied base. Equivalent but byte-different rewrites remain unintegrated. Package does not apply patches or commits.
 
 ## Failure
 
@@ -61,4 +62,12 @@ Package marks completed dependencies integrated and launches next ready tickets 
 
 ## Cleanup
 
-Cleanup is manual. Verify all agents inactive and inspect dirty worktrees before removing anything. Preserve needed handoffs/evidence. Package never removes panes, worktrees, branches, or runtime directories.
+After final accepted output is integrated, inspect `delivery_status`, then invoke:
+
+```text
+/delivery_cleanup {"runId":"run-1"}
+```
+
+Cleanup is explicit and run-scoped. It attempts every eligible `integrated` ticket in stable ID order. Before `herdr worktree remove --force`, package rechecks clean parent HEAD, patch digest, exact integration, recorded workspace/path, and inactive live agent state. `validation_passed`, blocked, failed, stopped, running, unknown, mismatched, legacy, or missing workspaces are retained with reasons.
+
+Repeated calls are idempotent: `cleaned` tickets produce no second removal. Partial removal failure leaves ticket `integrated`, reports exact resource, and continues. If Herdr removal succeeds but state persistence fails, stop and inspect Herdr plus preserved `.scratch/` evidence; never replay automatically. Cleanup preserves branches, prompts, results, handoffs, logs, patches, metadata, and run status.

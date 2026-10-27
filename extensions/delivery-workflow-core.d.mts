@@ -5,5 +5,6 @@ export function createDeliveryWorkflowCore(options?: Record<string, unknown>): R
   status(repositoryPath: string, input: { runId: string }): Promise<ToolResult>;
   steer(repositoryPath: string, input: { runId: string; ticketId: string; message: string }): Promise<ToolResult>;
   continue(repositoryPath: string, input: { runId: string; integratedSha: string }): Promise<ToolResult>;
+  cleanup(repositoryPath: string, input: { runId: string }): Promise<ToolResult>;
   stop(repositoryPath: string, input: { runId: string; ticketId?: string }): Promise<ToolResult>;
 }>;

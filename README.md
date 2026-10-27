@@ -51,7 +51,8 @@ After plan/ticket approval, call `delivery_start` with object fields:
 | `delivery_start` | Run approved graph visibly in current Pi process |
 | `delivery_status` | Read persisted inspection status |
 | `delivery_steer` | Prompt exact currently active agent |
-| `delivery_continue` | Continue after parent supplies clean integrated HEAD |
+| `delivery_continue` | Verify exact validated patches at clean integrated HEAD, then continue |
+| `delivery_cleanup` | Explicitly force-remove all eligible integrated Herdr worktrees; preserve branches/evidence |
 | `delivery_stop` | Send `Ctrl+C`; retain pane/worktree |
 
 Same-name slash commands accept JSON. `/delivery` accepts free text.
@@ -66,6 +67,8 @@ Same-name slash commands accept JSON. `/delivery` accepts free text.
   results/<ticket>.json
   handoffs/<ticket>.json
   logs/<ticket>.log
+  patches/<ticket>.patch
+  patches/<ticket>.json
 ```
 
 This state supports inspection, not transparent crash recovery. If Pi/workflow dies, inspect retained Herdr agents and worktrees. Start a new supervised run if needed. Never replay an ambiguous prompt or external action automatically.
@@ -78,9 +81,10 @@ This state supports inspection, not transparent crash recovery. If Pi/workflow d
 - Agent writes one nonce-bound result through scoped `delivery_result_write`.
 - Git determines changed paths; agent claims are advisory.
 - Validation uses executable plus argv with `shell: false`.
-- Blocked, failed, unknown, or timed-out work retains pane/worktree.
+- Successful validation records a binary-capable patch and SHA-256 digest before `validation_passed`.
+- Blocked, failed, unknown, timed-out, or unintegrated work retains pane/worktree.
 - No automatic reviewer/fix loop in core scheduler.
-- No automatic merge, patch application, cleanup, push, publish, deploy, or release.
+- No automatic merge, patch application, cleanup, branch deletion, push, publish, deploy, or release.
 
 ## Integration
 
@@ -90,7 +94,15 @@ At `awaiting_integration`, parent inspects branches, worktrees, changed paths, v
 /delivery_continue {"runId":"refresh-token","integratedSha":"<current-clean-head>"}
 ```
 
-Dependent tickets start with concise dependency handoffs and supplied base. Tickets consuming textual handoffs can run before code integration when `requiresIntegratedBase` is `false`.
+`delivery_continue` marks each `validation_passed` ticket `integrated` only when its exact persisted patch reverse-applies at the supplied clean current HEAD. Ancestry alone is insufficient. Dependent tickets start with concise dependency handoffs and supplied base. Tickets consuming textual handoffs can run before code integration when `requiresIntegratedBase` is `false`.
+
+After final integration, inspect status and clean eligible workspaces explicitly:
+
+```text
+/delivery_cleanup {"runId":"refresh-token"}
+```
+
+Cleanup rechecks evidence and live Herdr identity, then calls Herdr `worktree remove --force`. Repeated cleanup reports already-cleaned tickets. Branches and `.scratch/` evidence remain.
 
 ## Failure behavior
 

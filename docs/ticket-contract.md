@@ -55,4 +55,4 @@ Agent result schema:
 }
 ```
 
-Result claims do not establish changed paths or validation. Runtime checks Git and executes validation.
+Result claims do not establish changed paths or validation. Runtime checks Git and executes validation. After success, runtime captures all tracked/untracked changes as a binary temporary-index patch with SHA-256 metadata. Ticket becomes `validation_passed`; `delivery_continue` advances it to `integrated` only after exact reverse-apply proof at clean parent HEAD. Explicit `delivery_cleanup` advances eligible tickets to `cleaned` after confirmed Herdr worktree removal.
