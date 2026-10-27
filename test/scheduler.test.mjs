@@ -23,6 +23,20 @@ test("validates graph, ownership, cycles, and readiness", () => {
   const unsupported = input(); unsupported.tickets[0].worker.kind = "codex"; assert.throws(() => validateRunInput(unsupported), /must be pi, worker, or reviewer/);
 });
 
+test("normalizes bounded execution controls", () => {
+  const defaults = validateRunInput(input()).tickets[0];
+  assert.equal(defaults.maxFixRounds, 0);
+  assert.equal(defaults.timeoutSeconds, 300);
+  assert.equal(defaults.validationTimeoutSeconds, 300);
+
+  const value = input();
+  Object.assign(value.tickets[0], { maxFixRounds: 1, timeoutSeconds: 7200, validationTimeoutSeconds: 1800 });
+  const configured = validateRunInput(value).tickets[0];
+  assert.equal(configured.maxFixRounds, 1);
+  assert.equal(configured.timeoutSeconds, 7200);
+  assert.equal(configured.validationTimeoutSeconds, 1800);
+});
+
 test("parses porcelain v1 NUL renames with source and destination", () => {
   assert.deepEqual(parsePorcelainV1Z(`R  new.js\0old.js\0?? untracked.js\0`), ["new.js", "old.js", "untracked.js"]);
   assert.throws(() => parsePorcelainV1Z("R  new.js\0"), /source/);

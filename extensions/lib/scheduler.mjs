@@ -20,6 +20,11 @@ function workerKind(value, label) {
   if (!["pi", "worker", "reviewer"].includes(value)) throw new TypeError(`${label} must be pi, worker, or reviewer.`);
   return "pi";
 }
+function boundedInteger(value, label, minimum, maximum, defaultValue) {
+  const normalized = value === undefined ? defaultValue : value;
+  if (!Number.isSafeInteger(normalized) || normalized < minimum || normalized > maximum) throw new TypeError(`${label} must be an integer from ${minimum} to ${maximum}.`);
+  return normalized;
+}
 function command(value, label) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new TypeError(`${label} must be an object.`);
   const keys = Object.keys(value); if (keys.some((key) => !["executable", "args", "cwd"].includes(key))) throw new TypeError(`${label} has unknown properties.`);
@@ -37,7 +42,7 @@ export function validateTicketGraph(value) {
   const seen = new Set();
   const tickets = value.map((raw, index) => {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new TypeError(`tickets[${index}] must be an object.`);
-    const allowed = new Set(["id", "goal", "definitionOfDone", "dependencies", "ownedPaths", "forbiddenScope", "worker", "validation", "requiresIntegratedBase", "specPaths"]);
+    const allowed = new Set(["id", "goal", "definitionOfDone", "dependencies", "ownedPaths", "forbiddenScope", "worker", "validation", "requiresIntegratedBase", "specPaths", "maxFixRounds", "timeoutSeconds", "validationTimeoutSeconds"]);
     if (Object.keys(raw).some((key) => !allowed.has(key))) throw new TypeError(`${raw.id ?? `tickets[${index}]`} has unknown properties.`);
     const ticketId = id(raw.id, `tickets[${index}].id`); if (seen.has(ticketId)) throw new TypeError(`duplicate ticket ${ticketId}.`); seen.add(ticketId);
     if (!Array.isArray(raw.dependencies) || raw.dependencies.length > 32) throw new TypeError(`${ticketId}.dependencies is invalid.`);
@@ -56,6 +61,9 @@ export function validateTicketGraph(value) {
       validation: command(raw.validation, `${ticketId}.validation`),
       requiresIntegratedBase: raw.requiresIntegratedBase !== false,
       specPaths: Object.freeze((raw.specPaths ?? []).map((item) => relative(item, `${ticketId}.specPath`))),
+      maxFixRounds: boundedInteger(raw.maxFixRounds, `${ticketId}.maxFixRounds`, 0, 1, 0),
+      timeoutSeconds: boundedInteger(raw.timeoutSeconds, `${ticketId}.timeoutSeconds`, 60, 7200, 300),
+      validationTimeoutSeconds: boundedInteger(raw.validationTimeoutSeconds, `${ticketId}.validationTimeoutSeconds`, 30, 1800, 300),
     };
     return Object.freeze(normalized);
   });
