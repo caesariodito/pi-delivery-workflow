@@ -40,6 +40,19 @@ test("launch defers dependent spec checks and removes worktree when agent start 
   finally { if (previous === undefined) delete process.env.HERDR_ENV; else process.env.HERDR_ENV = previous; }
 });
 
+test("launch waits for interactive idle readiness before submitting ticket prompt", async () => {
+  const fixture = repository(); const calls = []; let polls = 0;
+  const herdr = {
+    async status() {}, async integrationStatus() { return [{ name: "pi", status: "current (v1)" }]; },
+    async worktreeCreate({ path: worktreePath }) { return { path: worktreePath, pane: "w1:p1", workspace: "w1" }; }, async agentStart() { calls.push("start"); },
+    async agentGet() { polls += 1; calls.push(`get:${polls}`); return { agent: { agent_status: "idle", interactive_ready: polls > 1 } }; },
+    async agentPrompt() { calls.push("prompt"); throw new Error("stop after prompt"); },
+  };
+  const previous = process.env.HERDR_ENV; process.env.HERDR_ENV = "1";
+  try { const output = await createDeliveryWorkflowCore({ herdr }).start(fixture.root, runInput(fixture.sha, fixture.worktreeRoot)); assert.match(output.details.tickets.T1.reason, /stop after prompt/); assert.deepEqual(calls, ["start", "get:1", "get:2", "prompt"]); }
+  finally { if (previous === undefined) delete process.env.HERDR_ENV; else process.env.HERDR_ENV = previous; }
+});
+
 test("worktree root diagnostics run before Herdr launch checks", async () => {
   const fixture = repository(); let checked = false; const herdr = { async status() { checked = true; } }; const previous = process.env.HERDR_ENV; process.env.HERDR_ENV = "1";
   try { await assert.rejects(createDeliveryWorkflowCore({ herdr }).start(fixture.root, runInput(fixture.sha, path.join(fixture.root, "missing"))), /existing real directory outside the repository/); assert.equal(checked, false); }

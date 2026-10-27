@@ -24,6 +24,15 @@ function statePath(directory) { return path.join(directory, "status.json"); }
 function save(directory, state) { state.updatedAt = new Date().toISOString(); atomicJson(statePath(directory), state); return state; }
 function contextFilesExist(repositoryPath, paths) { for (const item of paths) { const resolved = path.resolve(repositoryPath, item); const stat = fs.lstatSync(resolved); if (!inside(repositoryPath, resolved) || !stat.isFile() || stat.isSymbolicLink() || stat.size > 256 * 1024) throw new Error(`context file is unavailable: ${item}`); } }
 function parseAgentState(value) { return value?.agent?.agent_status ?? value?.agent?.status ?? value?.agent?.state ?? value?.event?.agent_status ?? value?.status ?? value?.state ?? "unknown"; }
+async function waitForInteractiveReady(herdr, target, timeoutMs = 10_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    const live = await herdr.agentGet(target);
+    if (parseAgentState(live) === "idle" && live?.agent?.interactive_ready === true) return live;
+    if (Date.now() >= deadline) throw new Error("agent did not reach interactive idle readiness after launch.");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
 
 async function verifyRepository(repositoryPath, baseSha, worktreeRoot, herdr) {
   const root = fs.realpathSync(repositoryPath);
@@ -67,6 +76,7 @@ export function createDeliveryWorkflowCore({ herdr = createHerdrAdapter({ env: b
       catch (cleanupError) { throw new Error(`${error instanceof Error ? error.message : String(error)}; pre-agent cleanup failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`); }
       throw new Error(`${error instanceof Error ? error.message : String(error)}; newly created worktree/workspace removed before approval-bound work began`);
     }
+    await waitForInteractiveReady(herdr, target);
     const promptResult = await herdr.agentPrompt({ target, prompt: `Read and follow the complete ticket context at ${promptPath}. Call ${RESULT_TOOL} exactly once when settled.`, wait: true, timeout: 300_000 });
     let status = parseAgentState(promptResult);
     if (status === "unknown" || !fs.existsSync(resultPath)) { const live = await herdr.agentGet(target); status = parseAgentState(live); }
