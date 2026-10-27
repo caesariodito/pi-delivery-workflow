@@ -47,12 +47,12 @@ test("launch passes ticket as Pi initial prompt instead of terminal input", asyn
     async status() {}, async integrationStatus() { return [{ name: "pi", status: "current (v1)" }]; },
     async worktreeCreate({ path: worktreePath }) { return { path: worktreePath, pane: "w1:p1", workspace: "w1" }; },
     async agentStart({ agentArgs }) { calls.push("start"); const separator = agentArgs.lastIndexOf("--"); assert.ok(separator > 0); assert.match(agentArgs[separator + 1], /Read and follow the complete ticket context/); },
-    async agentGet() { polls += 1; calls.push(`get:${polls}`); return { agent: { agent_status: polls > 1 ? "working" : "idle", interactive_ready: true } }; },
+    async agentGet() { polls += 1; calls.push(`get:${polls}`); return { agent: { agent_status: polls > 2 ? "unknown" : polls > 1 ? "working" : "idle", interactive_ready: true } }; },
     async agentWait() { calls.push("wait"); throw new Error("stop after wait"); },
     async agentPrompt() { assert.fail("initial ticket must not use terminal prompt injection"); },
   };
   const previous = process.env.HERDR_ENV; process.env.HERDR_ENV = "1";
-  try { const output = await createDeliveryWorkflowCore({ herdr }).start(fixture.root, runInput(fixture.sha, fixture.worktreeRoot)); assert.match(output.details.tickets.T1.reason, /stop after wait/); assert.deepEqual(calls, ["start", "get:1", "get:2", "wait"]); }
+  try { const output = await createDeliveryWorkflowCore({ herdr }).start(fixture.root, runInput(fixture.sha, fixture.worktreeRoot)); assert.match(output.details.tickets.T1.reason, /unknown state unknown/); assert.deepEqual(calls, ["start", "get:1", "get:2", "wait", "get:3"]); }
   finally { if (previous === undefined) delete process.env.HERDR_ENV; else process.env.HERDR_ENV = previous; }
 });
 
