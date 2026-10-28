@@ -98,7 +98,7 @@ async function verifyRepository(repositoryPath, baseSha, worktreeRoot, herdr) {
   const top = (await git(root, ["rev-parse", "--show-toplevel"])).trim(); if (fs.realpathSync(top) !== root) throw new Error("cwd must be repository root.");
   if ((await git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])).length) throw new Error("parent checkout must be clean.");
   const resolved = (await git(root, ["rev-parse", "--verify", `${baseSha}^{commit}`])).trim(); if (resolved !== baseSha) throw new Error("baseSha must be exact immutable commit.");
-  await git(root, ["check-ignore", "-q", ".scratch/"]); return root;
+  await git(root, ["check-ignore", "--no-index", "-q", ".scratch/"]); return root;
 }
 
 function owned(ticket, file) { return ticket.ownedPaths.some((claim) => claim.endsWith("/") ? file.startsWith(claim) : file === claim); }

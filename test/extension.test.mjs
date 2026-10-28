@@ -108,6 +108,30 @@ test("launch passes ticket as Pi initial prompt instead of terminal input", asyn
   finally { if (previous === undefined) delete process.env.HERDR_ENV; else process.env.HERDR_ENV = previous; }
 });
 
+test("preflight accepts ignored scratch with previously tracked artifacts", async () => {
+  const fixture = repository();
+  fs.mkdirSync(path.join(fixture.root, ".scratch"));
+  fs.writeFileSync(path.join(fixture.root, ".scratch", "historical.md"), "tracked artifact\n");
+  execFileSync("git", ["add", "-f", ".scratch/historical.md"], { cwd: fixture.root });
+  execFileSync("git", ["commit", "-qm", "test: track historical scratch artifact"], { cwd: fixture.root });
+  const sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: fixture.root, encoding: "utf8" }).trim();
+  const previous = process.env.HERDR_ENV; process.env.HERDR_ENV = "1";
+  try {
+    const core = createDeliveryWorkflowCore({ herdr: {
+      async status() {},
+      async integrationStatus() { return [{ name: "pi", status: "current (v1)" }]; },
+      async worktreeCreate() { throw new Error("passed repository preflight"); },
+    } });
+    const output = await core.start(fixture.root, runInput(sha, fixture.worktreeRoot));
+    assert.equal(output.details.phase, "blocked");
+    assert.match(output.details.tickets.T1.reason, /passed repository preflight/);
+  } finally {
+    if (previous === undefined) delete process.env.HERDR_ENV; else process.env.HERDR_ENV = previous;
+    fs.rmSync(fixture.root, { recursive: true, force: true });
+    fs.rmSync(fixture.worktreeRoot, { recursive: true, force: true });
+  }
+});
+
 test("worktree root diagnostics run before Herdr launch checks", async () => {
   const fixture = repository(); let checked = false; const herdr = { async status() { checked = true; } }; const previous = process.env.HERDR_ENV; process.env.HERDR_ENV = "1";
   try { await assert.rejects(createDeliveryWorkflowCore({ herdr }).start(fixture.root, runInput(fixture.sha, path.join(fixture.root, "missing"))), /existing real directory outside the repository/); assert.equal(checked, false); }
