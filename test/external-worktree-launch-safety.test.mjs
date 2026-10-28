@@ -93,6 +93,47 @@ test("post-create verification blocks returned-path contradiction without remova
   } finally { fs.rmSync(other, { recursive: true, force: true }); cleanup(f); }
 });
 
+test("continue validates persisted root and candidate worktree paths before mutating state", async () => {
+  for (const invalid of ["root", "candidate"]) {
+    const f = fixture(); const directory = path.join(f.root, ".scratch", "delivery", "safe-run"); fs.mkdirSync(directory, { recursive: true });
+    const run = { version: 2, ...input(f) }; const candidate = { status: "validation_passed", worktreePath: invalid === "candidate" ? f.root : path.join(f.worktreeRoot, "safe-run-T1") };
+    fs.writeFileSync(path.join(directory, "run.json"), `${JSON.stringify(run, null, 2)}\n`);
+    fs.writeFileSync(path.join(directory, "status.json"), `${JSON.stringify({ version: 2, runId: "safe-run", baseSha: f.baseSha, phase: "awaiting_integration", tickets: { T1: candidate } }, null, 2)}\n`);
+    fs.writeFileSync(path.join(f.root, "integrated.txt"), "integrated\n"); execFileSync("git", ["add", "."], { cwd: f.root }); execFileSync("git", ["commit", "-qm", "integrated"], { cwd: f.root }); const integratedSha = git(f.root, "rev-parse", "HEAD");
+    if (invalid === "root") fs.rmSync(f.worktreeRoot, { recursive: true, force: true });
+    const beforeRun = fs.readFileSync(path.join(directory, "run.json")); const beforeStatus = fs.readFileSync(path.join(directory, "status.json"));
+    try {
+      const output = await createDeliveryWorkflowCore({ herdr: herdr() }).continue(f.root, { runId: "safe-run", integratedSha });
+      assert.equal(output.isError, true); assert.equal(output.details.status, "blocked");
+      assert.match(output.content[0].text, invalid === "root" ? /worktreeRoot/ : /worktree path/);
+      assert.deepEqual(fs.readFileSync(path.join(directory, "run.json")), beforeRun); assert.deepEqual(fs.readFileSync(path.join(directory, "status.json")), beforeStatus);
+    } finally { cleanup(f); }
+  }
+});
+
+test("approve disposition validates review and pending downstream paths before mutating reviewed state", async () => {
+  for (const invalidTicket of ["root", "R1", "T1"]) {
+    const f = fixture(); const directory = path.join(f.root, ".scratch", "delivery", "safe-run"); fs.mkdirSync(directory, { recursive: true });
+    const run = { version: 2, ...input(f), tickets: [
+      { ...input(f).tickets[0], id: "R1", mode: "review", ownedPaths: [], readPaths: ["spec.md"], worker: { ...input(f).tickets[0].worker, name: "reviewer" } },
+      { ...input(f).tickets[0], dependencies: ["R1"] },
+    ] };
+    const recorded = (ticketId) => invalidTicket === ticketId ? f.root : path.join(f.worktreeRoot, `safe-run-${ticketId}`);
+    const state = { version: 2, runId: "safe-run", baseSha: f.baseSha, phase: "awaiting_disposition", tickets: {
+      R1: { status: "reviewed", verdict: "approve", worktreePath: recorded("R1"), reviewEvidence: { parentUnchanged: true, worktreeUnchanged: true } },
+      T1: { status: "pending", worktreePath: recorded("T1") },
+    } };
+    fs.writeFileSync(path.join(directory, "run.json"), `${JSON.stringify(run, null, 2)}\n`); fs.writeFileSync(path.join(directory, "status.json"), `${JSON.stringify(state, null, 2)}\n`);
+    if (invalidTicket === "root") fs.rmSync(f.worktreeRoot, { recursive: true, force: true });
+    const before = fs.readFileSync(path.join(directory, "status.json"));
+    try {
+      const output = await createDeliveryWorkflowCore({ herdr: herdr() }).dispose(f.root, { runId: "safe-run", ticketId: "R1", disposition: "approve" });
+      assert.equal(output.isError, true); assert.equal(output.details.status, "blocked"); assert.match(output.content[0].text, invalidTicket === "root" ? /worktreeRoot/ : /worktree path/);
+      assert.deepEqual(fs.readFileSync(path.join(directory, "status.json")), before);
+    } finally { cleanup(f); }
+  }
+});
+
 test("reconcile accepts legacy persisted root and blocks recorded path outside it", async () => {
   const f = fixture(); const directory = path.join(f.root, ".scratch", "delivery", "legacy-run"); fs.mkdirSync(directory, { recursive: true });
   fs.writeFileSync(path.join(directory, "run.json"), JSON.stringify({ version: 2, runId: "legacy-run", baseSha: f.baseSha, worktreeRoot: f.worktreeRoot, tickets: [] }));
