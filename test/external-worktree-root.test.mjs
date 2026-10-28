@@ -41,9 +41,17 @@ test("start schema makes only worktreeRoot optional and preview stays no-write",
   assert.equal(Check(start, { ...value, unknown: true }), false);
   assert.equal(Check(preview, value), true);
   assert.equal(Check(preview, { ...value, worktreeRoot: "/safe/root" }), false);
-  const before = new Set(fs.readdirSync(os.tmpdir()));
-  await pi.tools.get("delivery_preview").execute("id", value, undefined, undefined, { cwd: process.cwd() });
-  assert.deepEqual(new Set(fs.readdirSync(os.tmpdir())), before);
+  const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "delivery-preview-test-"));
+  const previousTmpdir = process.env.TMPDIR;
+  try {
+    process.env.TMPDIR = temporaryDirectory;
+    const before = new Set(fs.readdirSync(temporaryDirectory));
+    await pi.tools.get("delivery_preview").execute("id", value, undefined, undefined, { cwd: temporaryDirectory });
+    assert.deepEqual(new Set(fs.readdirSync(temporaryDirectory)), before);
+  } finally {
+    if (previousTmpdir === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = previousTmpdir;
+    fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
 });
 
 test("repository identity uses exact versioned canonical path bytes", () => {
