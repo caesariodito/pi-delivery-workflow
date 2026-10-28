@@ -275,11 +275,24 @@ export function createDeliveryWorkflowCore({ herdr = createHerdrAdapter({ env: b
     const state = existing ? readJson(statePath(directory)) : { version: 2, runId: run.runId, baseSha: run.baseSha, phase: "running", tickets: Object.fromEntries(run.tickets.map((ticket) => [ticket.id, { status: "pending", queuedAt }])), guidance: {}, updatedAt: queuedAt };
     active.set(directory, { state, run });
     const running = new Map(); let launchBlocked = false;
+    const notifyAdverseOutcome = async (ticketId, outcome) => {
+      if (!["blocked", "failed"].includes(outcome.status)) return;
+      const notifiedAt = new Date().toISOString();
+      try {
+        await herdr.notify({ title: `Delivery ${run.runId} ${ticketId} ${outcome.status}`, body: outcome.reason, sound: "request" });
+        state.tickets[ticketId] = { ...state.tickets[ticketId], notification: { status: "sent", notifiedAt } };
+      } catch (error) {
+        state.tickets[ticketId] = { ...state.tickets[ticketId], notification: { status: "failed", error: error instanceof Error ? error.message : String(error), notifiedAt } };
+      }
+      save(directory, state);
+    };
     const launch = (ticketId) => {
       const ticket = run.tickets.find((item) => item.id === ticketId);
       const promise = (async () => {
         let outcome; try { outcome = await executeTicket(root, directory, run, ticket, state, input.worktreeRoot); } catch (error) { outcome = { status: "blocked", reason: error instanceof Error ? error.message : String(error), ...(state.tickets[ticketId]?.timing ? { timing: state.tickets[ticketId].timing } : {}) }; }
-        state.tickets[ticketId] = { ...state.tickets[ticketId], ...outcome, settledAt: new Date().toISOString() }; save(directory, state); return [ticketId, outcome];
+        state.tickets[ticketId] = { ...state.tickets[ticketId], ...outcome, settledAt: new Date().toISOString() }; save(directory, state);
+        await notifyAdverseOutcome(ticketId, outcome);
+        return [ticketId, outcome];
       })();
       running.set(ticketId, promise); promise.finally(() => running.delete(ticketId));
     };
