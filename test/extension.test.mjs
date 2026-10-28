@@ -36,10 +36,18 @@ test("delivery_start TypeBox schema enforces inclusive integer bounds and reject
   const unknown = structuredClone(value); unknown.tickets[0].unexpected = true; assert.equal(Check(schema, unknown), false);
 });
 
-test("scoped result tool writes ticket result once", async () => {
+test("scoped result tool writes ticket result once with byte-compatible implementation output", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "delivery-result-")); const destination = path.join(root, "result.json"); const pi = fakePi(); pi.flags.set("delivery-result-path", destination); pi.flags.set("delivery-result-nonce", "nonce"); deliveryResultTool(pi); const tool = pi.tools.get("delivery_result_write");
   await tool.execute("id", { nonce: "nonce", ticketId: "T1", status: "done", summary: "done", changedPaths: ["src/a.js"], validation: "passed", handoff: "exports A", question: null });
-  assert.equal(JSON.parse(fs.readFileSync(destination)).ticketId, "T1"); assert.throws(() => fs.writeFileSync(destination, "again", { flag: "wx" }));
+  assert.equal(fs.readFileSync(destination, "utf8"), '{"version":1,"ticketId":"T1","status":"done","summary":"done","changedPaths":["src/a.js"],"validation":"passed","handoff":"exports A","question":null}\n'); assert.throws(() => fs.writeFileSync(destination, "again", { flag: "wx" }));
+});
+
+test("scoped result tool binds review mode, nonce, path, and single write", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "delivery-review-result-")); const destination = path.join(root, "result.json"); const pi = fakePi(); pi.flags.set("delivery-result-path", destination); pi.flags.set("delivery-result-nonce", "review-nonce"); pi.flags.set("delivery-result-mode", "review"); deliveryResultTool(pi); const tool = pi.tools.get("delivery_result_write");
+  const input = { nonce: "review-nonce", ticketId: "R1", verdict: "changes_requested", summary: "finding", findings: [{ severity: "high", affectedPath: "src/a.js", evidence: "evidence", disposition: "open" }], residualRisks: [], question: null };
+  await tool.execute("review", input); assert.deepEqual(Object.keys(JSON.parse(fs.readFileSync(destination))), ["version", "ticketId", "verdict", "summary", "findings", "residualRisks", "question"]);
+  await assert.rejects(tool.execute("again", input), /EEXIST/);
+  const wrong = fakePi(); wrong.flags.set("delivery-result-path", path.join(root, "wrong.json")); wrong.flags.set("delivery-result-nonce", "other"); wrong.flags.set("delivery-result-mode", "review"); deliveryResultTool(wrong); await assert.rejects(wrong.tools.get("delivery_result_write").execute("wrong", input), /nonce mismatch/);
 });
 
 test("scoped result tool advances once through parent-owned round binding", async () => {

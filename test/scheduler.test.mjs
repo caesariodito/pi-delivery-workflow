@@ -23,6 +23,22 @@ test("validates graph, ownership, cycles, and readiness", () => {
   const unsupported = input(); unsupported.tickets[0].worker.kind = "codex"; assert.throws(() => validateRunInput(unsupported), /must be pi, worker, or reviewer/);
 });
 
+test("normalizes strict implementation and review modes", () => {
+  assert.equal(validateRunInput(input()).tickets[0].mode, "implementation");
+  const value = input(); const review = value.tickets[0]; value.tickets = [review];
+  Object.assign(review, { mode: "review", ownedPaths: [], readPaths: ["src/", "README.md"], maxFixRounds: 0 }); review.worker.tools = ["read"];
+  const ticket = validateRunInput(value).tickets[0];
+  assert.equal(ticket.mode, "review"); assert.deepEqual(ticket.readPaths, ["src/", "README.md"]); assert.deepEqual(ticket.ownedPaths, []);
+  for (const mutate of [
+    (item) => { item.readPaths = undefined; },
+    (item) => { item.readPaths = ["../escape"]; },
+    (item) => { item.ownedPaths = ["src/a.js"]; },
+    (item) => { item.worker.tools = ["read", "write"]; },
+    (item) => { item.maxFixRounds = 1; },
+  ]) { const invalid = structuredClone(value); mutate(invalid.tickets[0]); assert.throws(() => validateRunInput(invalid)); }
+  const implementation = input(); implementation.tickets[0].readPaths = ["src/"]; assert.throws(() => validateRunInput(implementation), /readPaths/);
+});
+
 test("normalizes bounded execution controls", () => {
   const defaults = validateRunInput(input()).tickets[0];
   assert.equal(defaults.maxFixRounds, 0);
@@ -65,8 +81,24 @@ test("ticket result schema is exact and bounded", () => {
   assert.throws(() => validateTicketResult({ version: 1, ticketId: "T1", status: "done", summary: "ok", changedPaths: ["../escape"], validation: "passed", handoff: "x", question: null }, "T1"), /relative/);
 });
 
+test("review result schema is exact, bounded, and path-safe", () => {
+  const value = { version: 1, ticketId: "R1", verdict: "changes_requested", summary: "fix finding", findings: [{ severity: "high", affectedPath: "src/a.js", evidence: "unsafe edge", disposition: "open" }], residualRisks: ["parent validation pending"], question: null };
+  assert.deepEqual(validateTicketResult(value, "R1", "review"), value);
+  for (const mutate of [
+    (result) => { result.verdict = "done"; },
+    (result) => { result.findings[0].affectedPath = "../escape"; },
+    (result) => { result.findings[0].disposition = "fixed"; },
+    (result) => { result.extra = true; },
+  ]) { const invalid = structuredClone(value); mutate(invalid); assert.throws(() => validateTicketResult(invalid, "R1", "review")); }
+  const oversized = structuredClone(value); oversized.findings = Array.from({ length: 9 }, (_, index) => ({ severity: "low", affectedPath: `src/${index}.js`, evidence: "x".repeat(8000), disposition: "open" })); assert.throws(() => validateTicketResult(oversized, "R1", "review"), /64 KiB/);
+});
+
 test("context packet contains bounded ticket context and dependency handoffs", () => {
   const run = validateRunInput(input()); const ticket = run.tickets[2];
   const packet = buildContextPacket({ run, ticket, repositoryPath: "/repo", worktreePath: "/work/T3", promptPath: "/repo/.scratch/run/prompts/T3.md", resultPath: "/repo/.scratch/run/results/T3.json", nonce: "nonce", dependencyHandoffs: [{ ticketId: "T1", handoff: "exports A" }, { ticketId: "T2", handoff: "exports B" }] });
   assert.match(packet, /Ship visible workflow/); assert.match(packet, /exports A/); assert.match(packet, /exports B/); assert.match(packet, /src\/c\.js/); assert.match(packet, /delivery_result_write/); assert.doesNotMatch(packet, /unrelated transcript/);
+
+  const value = input(); value.tickets = [value.tickets[0]]; Object.assign(value.tickets[0], { mode: "review", ownedPaths: [], readPaths: ["src/"] }); value.tickets[0].worker.tools = ["read"];
+  const reviewRun = validateRunInput(value); const reviewPacket = buildContextPacket({ run: reviewRun, ticket: reviewRun.tickets[0], repositoryPath: "/repo", worktreePath: "/work/R1", promptPath: "/prompt", resultPath: "/result", nonce: "nonce" });
+  assert.match(reviewPacket, /## Read scope/); assert.match(reviewPacket, /Parent-run only/); assert.match(reviewPacket, /changes_requested/); assert.doesNotMatch(reviewPacket, /changedPaths/);
 });

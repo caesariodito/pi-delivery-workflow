@@ -58,26 +58,33 @@ export function validateTicketGraph(value) {
   const seen = new Set();
   const tickets = value.map((raw, index) => {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new TypeError(`tickets[${index}] must be an object.`);
-    const allowed = new Set(["id", "goal", "definitionOfDone", "dependencies", "ownedPaths", "forbiddenScope", "worker", "validation", "requiresIntegratedBase", "specPaths", "maxFixRounds", "timeoutSeconds", "validationTimeoutSeconds", "context"]);
+    const allowed = new Set(["id", "goal", "definitionOfDone", "dependencies", "ownedPaths", "forbiddenScope", "worker", "validation", "requiresIntegratedBase", "specPaths", "maxFixRounds", "timeoutSeconds", "validationTimeoutSeconds", "context", "mode", "readPaths"]);
     if (Object.keys(raw).some((key) => !allowed.has(key))) throw new TypeError(`${raw.id ?? `tickets[${index}]`} has unknown properties.`);
     const ticketId = id(raw.id, `tickets[${index}].id`); if (seen.has(ticketId)) throw new TypeError(`duplicate ticket ${ticketId}.`); seen.add(ticketId);
     if (!Array.isArray(raw.dependencies) || raw.dependencies.length > 32) throw new TypeError(`${ticketId}.dependencies is invalid.`);
-    if (!Array.isArray(raw.ownedPaths) || raw.ownedPaths.length === 0 || raw.ownedPaths.length > 64) throw new TypeError(`${ticketId}.ownedPaths is invalid.`);
+    const mode = raw.mode ?? "implementation";
+    if (!["implementation", "review"].includes(mode)) throw new TypeError(`${ticketId}.mode must be implementation or review.`);
+    if (!Array.isArray(raw.ownedPaths) || raw.ownedPaths.length > 64 || (mode === "implementation" && raw.ownedPaths.length === 0) || (mode === "review" && raw.ownedPaths.length !== 0)) throw new TypeError(`${ticketId}.ownedPaths is invalid for ${mode} mode.`);
+    if (mode === "review" ? !Array.isArray(raw.readPaths) || raw.readPaths.length === 0 || raw.readPaths.length > 64 : raw.readPaths !== undefined) throw new TypeError(`${ticketId}.readPaths is invalid for ${mode} mode.`);
     const worker = raw.worker;
     if (!worker || typeof worker !== "object" || Array.isArray(worker) || Object.keys(worker).some((key) => !["name", "kind", "model", "thinking", "tools"].includes(key))) throw new TypeError(`${ticketId}.worker is invalid.`);
-    if (!Array.isArray(worker.tools) || worker.tools.length === 0 || worker.tools.length > 32) throw new TypeError(`${ticketId}.worker.tools is invalid.`);
+    if (!Array.isArray(worker.tools) || worker.tools.length === 0 || worker.tools.length > 32 || (mode === "review" && (worker.tools.length !== 1 || worker.tools[0] !== "read"))) throw new TypeError(`${ticketId}.worker.tools is invalid for ${mode} mode.`);
+    const maxFixRounds = boundedInteger(raw.maxFixRounds, `${ticketId}.maxFixRounds`, 0, 1, 0);
+    if (mode === "review" && maxFixRounds !== 0) throw new TypeError(`${ticketId}.maxFixRounds must be zero in review mode.`);
     const normalized = {
       id: ticketId,
+      mode,
       goal: text(raw.goal, `${ticketId}.goal`),
       definitionOfDone: text(raw.definitionOfDone, `${ticketId}.definitionOfDone`),
       dependencies: Object.freeze(raw.dependencies.map((item) => id(item, `${ticketId}.dependency`))),
       ownedPaths: Object.freeze(raw.ownedPaths.map((item) => relative(item, `${ticketId}.ownedPath`, item.endsWith("/")))),
+      ...(mode === "review" ? { readPaths: Object.freeze(raw.readPaths.map((item) => relative(item, `${ticketId}.readPath`, item.endsWith("/")))) } : {}),
       forbiddenScope: text(raw.forbiddenScope ?? "Everything outside owned paths.", `${ticketId}.forbiddenScope`),
       worker: Object.freeze({ name: agentName(worker.name, `${ticketId}.worker.name`), kind: workerKind(worker.kind, `${ticketId}.worker.kind`), model: text(worker.model, `${ticketId}.worker.model`, 256), thinking: text(worker.thinking, `${ticketId}.worker.thinking`, 32), tools: Object.freeze(worker.tools.map((item) => id(item, `${ticketId}.worker.tool`))) }),
       validation: command(raw.validation, `${ticketId}.validation`),
       requiresIntegratedBase: raw.requiresIntegratedBase !== false,
       specPaths: Object.freeze((raw.specPaths ?? []).map((item) => relative(item, `${ticketId}.specPath`))),
-      maxFixRounds: boundedInteger(raw.maxFixRounds, `${ticketId}.maxFixRounds`, 0, 1, 0),
+      maxFixRounds,
       timeoutSeconds: boundedInteger(raw.timeoutSeconds, `${ticketId}.timeoutSeconds`, 60, 7200, 300),
       validationTimeoutSeconds: boundedInteger(raw.validationTimeoutSeconds, `${ticketId}.validationTimeoutSeconds`, 30, 1800, 300),
       ...(raw.context === undefined ? {} : { context: ticketContext(raw.context, `${ticketId}.context`) }),
@@ -123,7 +130,26 @@ export function parsePorcelainV1Z(value) {
   return Object.freeze([...new Set(changed)].sort());
 }
 
-export function validateTicketResult(value, ticketId) {
+export function validateTicketResult(value, ticketId, mode = "implementation") {
+  if (mode === "review") {
+    const keys = ["version", "ticketId", "verdict", "summary", "findings", "residualRisks", "question"];
+    if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).length !== keys.length || Object.keys(value).some((key) => !keys.includes(key))) throw new TypeError("review result is invalid.");
+    if (value.version !== 1 || value.ticketId !== ticketId || !["approve", "changes_requested", "blocked"].includes(value.verdict)) throw new TypeError("review result identity or verdict is invalid.");
+    text(value.summary, "review result summary");
+    if (!Array.isArray(value.findings) || value.findings.length > 128) throw new TypeError("review result findings is invalid.");
+    const findings = Object.freeze(value.findings.map((finding, index) => {
+      const label = `review result findings[${index}]`;
+      if (!finding || typeof finding !== "object" || Array.isArray(finding) || Object.keys(finding).length !== 4 || Object.keys(finding).some((key) => !["severity", "affectedPath", "evidence", "disposition"].includes(key))) throw new TypeError(`${label} is invalid.`);
+      if (!["critical", "high", "medium", "low"].includes(finding.severity) || finding.disposition !== "open") throw new TypeError(`${label} severity or disposition is invalid.`);
+      return Object.freeze({ severity: finding.severity, affectedPath: relative(finding.affectedPath, `${label}.affectedPath`, finding.affectedPath?.endsWith("/")), evidence: text(finding.evidence, `${label}.evidence`, 8000), disposition: "open" });
+    }));
+    const residualRisks = stringArray(value.residualRisks, "review result residualRisks");
+    if (value.question !== null) text(value.question, "review result question", 4000);
+    const result = { version: 1, ticketId, verdict: value.verdict, summary: value.summary, findings, residualRisks, question: value.question };
+    if (Buffer.byteLength(`${JSON.stringify(result)}\n`) > 64 * 1024) throw new TypeError("review result exceeds 64 KiB.");
+    return Object.freeze(result);
+  }
+  if (mode !== "implementation") throw new TypeError("agent result mode is invalid.");
   if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).some((key) => !["version", "ticketId", "status", "summary", "changedPaths", "validation", "handoff", "question"].includes(key))) throw new TypeError("agent result is invalid.");
   if (value.version !== 1 || value.ticketId !== ticketId || !["done", "blocked", "failed"].includes(value.status)) throw new TypeError("agent result identity or status is invalid.");
   text(value.summary, "agent result summary"); text(value.handoff, "agent result handoff", 8000);
@@ -144,15 +170,15 @@ export function buildContextPacket({ run, ticket, repositoryPath, worktreePath, 
     "", "## Definition of done", ticket.definitionOfDone,
     ...richContext,
     "", "## Paths", `- Repository: \`${repositoryPath}\``, `- Assigned worktree: \`${worktreePath}\``, `- Context packet: \`${promptPath}\``, `- Result file: \`${resultPath}\``, `- Immutable base: \`${run.baseSha}\``,
-    "", "## Ownership", ...ticket.ownedPaths.map((item) => `- \`${item}\``), `- Forbidden: ${ticket.forbiddenScope}`,
+    "", ticket.mode === "review" ? "## Read scope" : "## Ownership", ...(ticket.mode === "review" ? ticket.readPaths : ticket.ownedPaths).map((item) => `- \`${item}\``), `- Forbidden: ${ticket.forbiddenScope}`,
     "", "## Dependencies", ...(ticket.dependencies.length ? ticket.dependencies.map((item) => `- ${item}`) : ["- None"]),
     "", "## Dependency handoffs", ...(dependencyHandoffs.length ? dependencyHandoffs.map((item) => `- **${item.ticketId}:** ${item.handoff}`) : ["- None"]),
     "", "## Source documents", ...[...run.contextPaths, ...ticket.specPaths].map((item) => `- \`${item}\``),
-    "", "## Validation", `- Executable: \`${ticket.validation.executable}\``, `- Args: ${JSON.stringify(ticket.validation.args)}`, `- Cwd: \`${ticket.validation.cwd ?? "."}\``,
+    "", "## Validation", ...(ticket.mode === "review" ? ["- Parent-run only; reviewer must not execute validation."] : []), `- Executable: \`${ticket.validation.executable}\``, `- Args: ${JSON.stringify(ticket.validation.args)}`, `- Cwd: \`${ticket.validation.cwd ?? "."}\``,
     ...(run.integrationValidation ? ["", "## Integration validation", `- Executable: \`${run.integrationValidation.executable}\``, `- Args: ${JSON.stringify(run.integrationValidation.args)}`, `- Cwd: \`${run.integrationValidation.cwd ?? "."}\``, `- Timeout seconds: ${run.integrationValidation.timeoutSeconds}`] : []),
     "", "## Agent contract", `- Model: \`${ticket.worker.model}\``, `- Thinking: \`${ticket.worker.thinking}\``, `- Tools: ${ticket.worker.tools.map((item) => `\`${item}\``).join(", ")}`,
     "", "## Parent guidance", guidance || "None.",
-    "", "## Required result", `Call \`delivery_result_write\` once with nonce \`${nonce}\` and this schema:`, "```json", JSON.stringify({ nonce, ticketId: ticket.id, status: "done | blocked | failed", summary: "bounded summary", changedPaths: ["relative/path"], validation: "passed | failed | not_run", handoff: "short context for dependent agents", question: null }, null, 2), "```",
+    "", "## Required result", `Call \`delivery_result_write\` once with nonce \`${nonce}\` and this schema:`, "```json", JSON.stringify(ticket.mode === "review" ? { nonce, ticketId: ticket.id, verdict: "approve | changes_requested | blocked", summary: "bounded summary", findings: [{ severity: "critical | high | medium | low", affectedPath: "relative/path", evidence: "bounded evidence", disposition: "open" }], residualRisks: ["bounded risk"], question: null } : { nonce, ticketId: ticket.id, status: "done | blocked | failed", summary: "bounded summary", changedPaths: ["relative/path"], validation: "passed | failed | not_run", handoff: "short context for dependent agents", question: null }, null, 2), "```",
     "", "## Stop and escalation", "Stop and report blocked for scope changes, dependency additions, architecture/product decisions, unknown Herdr state, ambiguous prior action, destructive operations, publication, or work outside owned paths. Do not merge, clean up, push, publish, deploy, or replace another agent.",
   ];
   const packet = `${lines.join("\n")}\n`; if (Buffer.byteLength(packet) > 64 * 1024) throw new Error("context packet exceeds 64 KiB."); return packet;
