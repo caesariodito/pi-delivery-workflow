@@ -173,16 +173,16 @@ async function parentSnapshot(root) {
 async function reconcileObservations(root, directory, state, herdr, worktreeRoot, runId) {
   const response = await herdr.workspaceList();
   if (!Array.isArray(response?.workspaces)) throw new Error("Herdr workspace state is malformed.");
-  const workspaces = new Map(response.workspaces.map((workspace) => [workspace.workspace_id, workspace]));
   const liveTickets = {}; const evidenceTickets = {}; const gitTickets = {};
   for (const [ticketId, ticket] of Object.entries(state.tickets ?? {}).sort(([a], [b]) => a.localeCompare(b))) {
-    const workspace = workspaces.get(ticket.workspace); const recordedPath = ticket.worktreePath;
+    const matches = ticket.workspace === undefined ? [] : response.workspaces.filter((workspace) => workspace?.workspace_id === ticket.workspace);
+    const workspace = matches.length === 1 && herdrIdentifier(matches[0].workspace_id) ? matches[0] : null; const recordedPath = ticket.worktreePath;
     if (recordedPath && worktreeRoot) {
       verifyRecordedWorktree(worktreeRoot, recordedPath);
       if (recordedPath !== expectedWorktreePath(worktreeRoot, runId, ticketId)) throw new Error("recorded worktree path does not match exact ticket evidence.");
     }
     const livePath = workspace?.worktree?.checkout_path;
-    liveTickets[ticketId] = { agentStatus: workspace?.agent_status ?? "unknown", workspacePresent: Boolean(workspace), worktreePresent: Boolean(livePath && fs.existsSync(livePath)), identityMatches: workspace ? Boolean(recordedPath && livePath && path.resolve(livePath) === path.resolve(recordedPath)) : undefined };
+    liveTickets[ticketId] = { agentStatus: workspace?.agent_status ?? "unknown", workspacePresent: Boolean(workspace), worktreePresent: Boolean(livePath && fs.existsSync(livePath)), identityMatches: ticket.workspace === undefined ? undefined : workspace ? Boolean(recordedPath && livePath && path.resolve(livePath) === path.resolve(recordedPath)) : false };
     let validationPassed = ticket.validation?.passed === true && Boolean(ticket.patchEvidence);
     if (ticket.patchEvidence) try { const metadata = readJson(ticket.patchEvidence.metadataPath); validationPassed &&= metadata.ticketId === ticketId && metadata.sha256 === ticket.patchEvidence.sha256; } catch { validationPassed = false; }
     evidenceTickets[ticketId] = {

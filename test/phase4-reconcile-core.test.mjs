@@ -50,6 +50,24 @@ test("reconcile reports bounded contradictory observations and safe retain actio
   assert.deepEqual(calls, ["workspaceList"]); assert.equal(output.isError, true); assert.equal(output.details.hasContradictions, true); assert.deepEqual(output.details.tickets[0].contradictions.map(({ code }) => code), ["live_done_not_proof", "running_agent_not_active", "workspace_identity_mismatch"]); assert.deepEqual(output.details.safeActions, ["inspect_and_retain"]); assert.equal(output.details.inferredSuccess, false);
 });
 
+for (const [kind, workspace, workspaces] of [
+  ["duplicate", "w1", [{ workspace_id: "w1", agent_status: "working" }, { workspace_id: "w1", agent_status: "working" }]],
+  ["malformed", " w1", [{ workspace_id: " w1", agent_status: "working" }]],
+]) test(`reconcile retains ${kind} live workspace identity without deriving live state or mutation`, async () => {
+  const run = fixture("running", { workspace }); const before = bytes(run.root, run.directory); const calls = [];
+  const herdr = {
+    async workspaceList() { calls.push("workspaceList"); return { workspaces }; },
+    async worktreeRemove() { assert.fail("mutator called"); },
+    async agentPrompt() { assert.fail("mutator called"); },
+    async agentStart() { assert.fail("mutator called"); },
+    async agentSendKeys() { assert.fail("mutator called"); },
+  };
+  const output = await createDeliveryWorkflowCore({ herdr }).reconcile(run.root, { runId: "run-1" });
+  assert.deepEqual(calls, ["workspaceList"]); assert.equal(output.isError, true); assert.equal(output.details.hasContradictions, true);
+  assert.equal(output.details.tickets[0].liveStatus, "unknown"); assert.deepEqual(output.details.tickets[0].contradictions.map(({ code }) => code), ["live_state_unknown", "workspace_identity_mismatch"]);
+  assert.equal(output.details.tickets[0].recommendation.action, "inspect_and_retain"); assert.deepEqual(output.details.safeActions, ["inspect_and_retain"]); assert.deepEqual(bytes(run.root, run.directory), before);
+});
+
 test("malformed Herdr observation blocks without fallback or mutation", async () => {
   const run = fixture("running"); const before = bytes(run.root, run.directory); const output = await createDeliveryWorkflowCore({ herdr: { async workspaceList() { return {}; } } }).reconcile(run.root, { runId: "run-1" });
   assert.equal(output.isError, true); assert.equal(output.details.status, "blocked"); assert.deepEqual(output.details.safeActions, ["inspect_and_retain"]); assert.deepEqual(bytes(run.root, run.directory), before);
