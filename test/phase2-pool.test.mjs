@@ -33,13 +33,20 @@ test("active pool refills immediately, respects cap, and persists lifecycle timi
   await until(() => herdr.starts.length === 2); assert.equal(herdr.maximum, 2);
   gates.T1.resolve(); await until(() => herdr.starts.length === 3); assert.deepEqual(herdr.starts, ["T1", "T2", "T3"]); assert.equal(herdr.maximum, 2);
   gates.T2.resolve(); gates.T3.resolve(); const output = await running; assert.equal(output.details.phase, "awaiting_integration");
-  for (const state of Object.values(output.details.tickets)) { assert.ok(state.queuedAt); assert.ok(state.launchStartedAt); assert.ok(state.startedAt); assert.ok(state.settledAt); assert.ok(state.queuedAt <= state.launchStartedAt); assert.ok(state.launchStartedAt <= state.settledAt); }
+  for (const state of Object.values(output.details.tickets)) { assert.ok(state.queuedAt); assert.ok(state.launchStartedAt); assert.ok(state.startedAt); assert.ok(state.settledAt); assert.ok(state.queuedAt <= state.launchStartedAt); assert.ok(state.launchStartedAt <= state.settledAt); assert.ok(state.timing.contextBytes > 0); assert.ok(state.timing.startupElapsedMs >= 0); assert.ok(state.timing.workerElapsedMs >= 0); assert.ok(state.timing.validationElapsedMs >= 0); assert.equal(state.timing.fixCount, 0); }
 }));
 
 test("failure stops new launches but drains active tickets", async () => withHerdrEnvironment(async () => {
   const f = fixture(); const gates = Object.fromEntries(["T1", "T2", "T3"].map((id) => [id, deferred()])); const herdr = fakeHerdr(f, gates, { T1: "failed" }); let settled = false; const running = createDeliveryWorkflowCore({ herdr }).start(f.root, input(f, [ticket("T1"), ticket("T2"), ticket("T3")])).then((value) => { settled = true; return value; });
   await until(() => herdr.starts.length === 2); gates.T1.resolve(); await until(() => JSON.parse(fs.readFileSync(path.join(f.root, ".scratch", "delivery", "pool-run", "status.json"))).tickets.T1.settledAt); assert.deepEqual(herdr.starts, ["T1", "T2"]); assert.equal(settled, false);
   gates.T2.resolve(); const output = await running; assert.equal(output.details.phase, "blocked"); assert.equal(output.details.tickets.T3.status, "pending"); assert.ok(output.details.tickets.T2.settledAt);
+}));
+
+test("same-turn success and failure settlements block refill and drain active tickets", async () => withHerdrEnvironment(async () => {
+  const f = fixture(); const gates = Object.fromEntries(["T1", "T2", "T3"].map((id) => [id, deferred()])); const herdr = fakeHerdr(f, gates, { T2: "failed" });
+  const running = createDeliveryWorkflowCore({ herdr }).start(f.root, input(f, [ticket("T1"), ticket("T2"), ticket("T3")]));
+  await until(() => herdr.starts.length === 2); gates.T1.resolve(); gates.T2.resolve();
+  const output = await running; assert.deepEqual(herdr.starts, ["T1", "T2"]); assert.equal(output.details.phase, "blocked"); assert.equal(output.details.tickets.T3.status, "pending"); assert.ok(output.details.tickets.T1.settledAt); assert.ok(output.details.tickets.T2.settledAt);
 }));
 
 test("integration requirement remains a launch barrier", async () => withHerdrEnvironment(async () => {

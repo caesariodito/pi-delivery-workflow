@@ -6,6 +6,7 @@ import test from "node:test";
 import { execFileSync } from "node:child_process";
 import deliveryWorkflow from "../extensions/delivery-workflow.ts";
 import deliveryResultTool from "../extensions/reviewer-result-tool.ts";
+import { Check } from "typebox/value";
 import { createDeliveryWorkflowCore } from "../extensions/delivery-workflow-core.mjs";
 
 function fakePi() { const tools = new Map(); const commands = new Map(); const flags = new Map(); return { tools, commands, flags, registerTool(tool) { tools.set(tool.name, tool); }, registerCommand(name, command) { commands.set(name, command); }, registerFlag(name) { if (!flags.has(name)) flags.set(name, undefined); }, getFlag(name) { return flags.get(name); }, sendUserMessage() {} }; }
@@ -25,6 +26,14 @@ test("registers thin supervised tool surface", () => {
   assert.deepEqual([...pi.tools.keys()].sort(), ["delivery_cleanup", "delivery_continue", "delivery_start", "delivery_status", "delivery_steer", "delivery_stop"]);
   assert.deepEqual(pi.tools.get("delivery_cleanup").annotations, { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false });
   assert.equal(pi.commands.has("delivery"), true); assert.equal(pi.tools.has("delivery_recover"), false); assert.equal(pi.tools.has("delivery_reply"), false); assert.equal(pi.tools.has("delivery_review"), false);
+});
+
+test("delivery_start TypeBox schema enforces inclusive integer bounds and rejects unknown fields", () => {
+  const pi = fakePi(); deliveryWorkflow(pi); const schema = pi.tools.get("delivery_start").parameters; const fixture = repository(); const value = runInput(fixture.sha, fixture.worktreeRoot); const ticket = value.tickets[0]; value.tickets = [ticket];
+  Object.assign(ticket, { maxFixRounds: 0, timeoutSeconds: 60, validationTimeoutSeconds: 30 }); assert.equal(Check(schema, value), true);
+  Object.assign(ticket, { maxFixRounds: 1, timeoutSeconds: 7200, validationTimeoutSeconds: 1800 }); assert.equal(Check(schema, value), true);
+  for (const [key, invalid] of [["maxFixRounds", 2], ["timeoutSeconds", 59], ["timeoutSeconds", 60.5], ["validationTimeoutSeconds", 1801]]) { const changed = structuredClone(value); changed.tickets[0][key] = invalid; assert.equal(Check(schema, changed), false, `${key} accepted ${invalid}`); }
+  const unknown = structuredClone(value); unknown.tickets[0].unexpected = true; assert.equal(Check(schema, unknown), false);
 });
 
 test("scoped result tool writes ticket result once", async () => {

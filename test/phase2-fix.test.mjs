@@ -14,14 +14,15 @@ function fixture() {
 }
 function input(f, maxFixRounds = 1) { return { runId: "fix-run", objective: "Repair once", baseSha: f.sha, worktreeRoot: f.worktreeRoot, tickets: [{ id: "T1", goal: "Pass", definitionOfDone: "Validation passes", dependencies: [], ownedPaths: ["a.txt"], worker: { name: "worker", kind: "worker", model: "model", thinking: "medium", tools: ["read", "write"] }, validation: { executable: process.execPath, args: ["-e", "process.exit(require('fs').readFileSync('a.txt','utf8').trim()==='good'?0:1)"] }, specPaths: ["spec.md"], maxFixRounds, timeoutSeconds: 60, validationTimeoutSeconds: 30 }] }; }
 function writeResult(file, status = "done") { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify({ version: 1, ticketId: "T1", status, summary: status, changedPaths: ["a.txt"], validation: status === "done" ? "passed" : "not_run", handoff: "result", question: null }), { flag: "wx" }); }
-function fakeHerdr(f, { repair = true, initialStatus = "done" } = {}) {
-  let worktree; let bindingDir; const prompts = [];
-  return { prompts,
+function fakeHerdr(f, { repair = true, initialStatus = "done", promptStatus = "done", promptThrows = false, liveAfterPrompt = ["done"] } = {}) {
+  let worktree; let bindingDir; let repairStarted = false; let liveIndex = 0; const prompts = []; const waits = [];
+  return { prompts, waits,
     async status() {}, async integrationStatus() { return [{ name: "pi", status: "current (v1)" }]; },
     async worktreeCreate({ path: created }) { worktree = created; execFileSync("git", ["worktree", "add", "--detach", created, f.sha], { cwd: f.root, stdio: "ignore" }); return { path: created, pane: "p1", workspace: "w1" }; },
     async agentStart({ agentArgs }) { assert.equal(agentArgs[agentArgs.indexOf("--model") + 1], "model"); bindingDir = agentArgs[agentArgs.indexOf("--delivery-result-binding-dir") + 1]; fs.writeFileSync(path.join(worktree, "a.txt"), "bad\n"); writeResult(agentArgs[agentArgs.indexOf("--delivery-result-path") + 1], initialStatus); },
-    async agentGet() { return { agent: { agent_status: "done" } }; },
-    async agentPrompt({ target, prompt, wait }) { prompts.push({ target, prompt, wait }); const binding = JSON.parse(fs.readFileSync(path.join(bindingDir, "round-1.json"))); if (repair) fs.writeFileSync(path.join(worktree, "a.txt"), "good\n"); writeResult(binding.resultPath); return { agent: { agent_status: "done" } }; },
+    async agentGet() { const status = repairStarted ? liveAfterPrompt[Math.min(liveIndex++, liveAfterPrompt.length - 1)] : "done"; return { agent: { agent_status: status } }; },
+    async agentWait({ timeout }) { waits.push(timeout); return { agent: { agent_status: "done" } }; },
+    async agentPrompt({ target, prompt, wait }) { prompts.push({ target, prompt, wait }); repairStarted = true; const binding = JSON.parse(fs.readFileSync(path.join(bindingDir, "round-1.json"))); if (repair) fs.writeFileSync(path.join(worktree, "a.txt"), "good\n"); writeResult(binding.resultPath); if (promptThrows) throw new Error("prompt transport timeout"); return { agent: { agent_status: promptStatus } }; },
   };
 }
 async function run(f, herdr, value = input(f)) { const previous = process.env.HERDR_ENV; process.env.HERDR_ENV = "1"; try { return await createDeliveryWorkflowCore({ herdr, nonce: (() => { let n = 0; return () => `nonce-${n++}`; })() }).start(f.root, value); } finally { if (previous === undefined) delete process.env.HERDR_ENV; else process.env.HERDR_ENV = previous; } }
@@ -32,6 +33,21 @@ test("one same-agent repair uses fresh immutable prompt, result, log, nonce, and
   assert.equal(ticket.rounds.length, 2); assert.notEqual(ticket.rounds[0].promptPath, ticket.rounds[1].promptPath); assert.notEqual(ticket.rounds[0].resultPath, ticket.rounds[1].resultPath); assert.notEqual(ticket.rounds[0].logPath, ticket.rounds[1].logPath);
   assert.equal(ticket.rounds[0].validation.passed, false); assert.equal(ticket.rounds[1].validation.passed, true);
   const bindings = [0, 1].map((round) => JSON.parse(fs.readFileSync(path.join(f.root, ".scratch", "delivery", "fix-run", "tickets", "T1", "result-bindings", `round-${round}.json`)))); assert.notEqual(bindings[0].nonce, bindings[1].nonce); assert.match(fs.readFileSync(ticket.rounds[1].promptPath, "utf8"), /Bounded output/);
+});
+
+test("working repair response waits for terminal live state even when result exists", async () => {
+  const f = fixture(); const herdr = fakeHerdr(f, { promptStatus: "working", liveAfterPrompt: ["done"] }); const output = await run(f, herdr);
+  assert.equal(output.details.tickets.T1.status, "validation_passed"); assert.equal(herdr.waits.length, 2);
+});
+
+test("repair prompt error reconciles working agent then waits", async () => {
+  const f = fixture(); const herdr = fakeHerdr(f, { promptThrows: true, liveAfterPrompt: ["working", "done"] }); const output = await run(f, herdr);
+  assert.equal(output.details.tickets.T1.status, "validation_passed"); assert.equal(herdr.waits.length, 2);
+});
+
+test("unknown repair state blocks without retry or replacement", async () => {
+  const f = fixture(); const herdr = fakeHerdr(f, { promptStatus: "unknown", liveAfterPrompt: ["unknown"] }); const output = await run(f, herdr);
+  assert.equal(output.details.tickets.T1.status, "blocked"); assert.match(output.details.tickets.T1.reason, /unknown state unknown/); assert.equal(herdr.prompts.length, 1); assert.equal(herdr.waits.length, 1);
 });
 
 test("repair exhaustion fails after one extra prompt", async () => {

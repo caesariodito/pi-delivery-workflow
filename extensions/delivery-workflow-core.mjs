@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createHash, randomBytes } from "node:crypto";
 import { buildChildEnvironment, createHerdrAdapter } from "./lib/herdr.mjs";
@@ -21,7 +21,22 @@ function exclusiveJson(file, value) { fs.mkdirSync(path.dirname(file), { recursi
 function readJson(file, maximum = 256 * 1024) { const stat = fs.lstatSync(file); if (!stat.isFile() || stat.isSymbolicLink() || stat.size > maximum) throw new Error("inspection file is invalid."); return JSON.parse(fs.readFileSync(file, "utf8")); }
 function runDir(repositoryPath, runId) { return path.join(repositoryPath, ".scratch", "delivery", safeId(runId, "runId")); }
 function git(repositoryPath, args, { env = {}, encoding = "utf8", maxBuffer = 2 * 1024 * 1024 } = {}) { return new Promise((resolve, reject) => execFile("git", args, { cwd: repositoryPath, env: { ...buildChildEnvironment(), ...env }, encoding, maxBuffer, timeout: 30_000, shell: false }, (error, stdout, stderr) => error ? reject(new Error(`git ${args.join(" ")} failed: ${String(stderr).trim()}`)) : resolve(stdout))); }
-export function runValidation(spec, worktreePath, timeoutMs) { const cwd = fs.realpathSync(path.resolve(worktreePath, spec.cwd ?? ".")); const root = fs.realpathSync(worktreePath); if (cwd !== root && !inside(root, cwd)) throw new Error("validation cwd escapes worktree."); const startedAt = Date.now(); return new Promise((resolve) => execFile(spec.executable, spec.args, { cwd, env: buildChildEnvironment(), encoding: "utf8", maxBuffer: 2 * 1024 * 1024, timeout: timeoutMs, shell: false }, (error, stdout, stderr) => resolve({ passed: !error, timedOut: error?.killed === true, code: error?.code ?? 0, stdout, stderr, timeoutMs, elapsedMs: Date.now() - startedAt }))); }
+export function runValidation(spec, worktreePath, timeoutMs) {
+  const cwd = fs.realpathSync(path.resolve(worktreePath, spec.cwd ?? ".")); const root = fs.realpathSync(worktreePath);
+  if (cwd !== root && !inside(root, cwd)) throw new Error("validation cwd escapes worktree.");
+  if (process.platform === "win32") throw new Error("validation process-tree termination is unsupported on win32.");
+  const startedAt = performance.now(); const maximum = 2 * 1024 * 1024; const graceMs = 250;
+  return new Promise((resolve) => {
+    let stdout = ""; let stderr = ""; let timedOut = false; let outputExceeded = false; let settled = false; let escalation;
+    const child = spawn(spec.executable, spec.args, { cwd, env: buildChildEnvironment(), detached: true, stdio: ["ignore", "pipe", "pipe"], shell: false });
+    const append = (current, chunk) => { const next = current + chunk; if (Buffer.byteLength(next) > maximum) { outputExceeded = true; terminate("SIGTERM"); return next.slice(0, maximum); } return next; };
+    const terminate = (signal) => { if (!child.pid) return; try { process.kill(-child.pid, signal); } catch (error) { if (error?.code !== "ESRCH") stderr += `${error instanceof Error ? error.message : String(error)}\n`; } };
+    child.stdout.setEncoding("utf8"); child.stderr.setEncoding("utf8"); child.stdout.on("data", (chunk) => { stdout = append(stdout, chunk); }); child.stderr.on("data", (chunk) => { stderr = append(stderr, chunk); });
+    const timeout = setTimeout(() => { timedOut = true; terminate("SIGTERM"); escalation = setTimeout(() => terminate("SIGKILL"), graceMs); }, timeoutMs);
+    child.once("error", (error) => { stderr += error.message; });
+    child.once("close", (code, signal) => { if (settled) return; settled = true; clearTimeout(timeout); clearTimeout(escalation); resolve({ passed: code === 0 && !timedOut && !outputExceeded, timedOut, code: code ?? signal ?? "spawn_error", stdout, stderr, timeoutMs, elapsedMs: Math.max(0, performance.now() - startedAt) }); });
+  });
+}
 function statePath(directory) { return path.join(directory, "status.json"); }
 function save(directory, state) { state.updatedAt = new Date().toISOString(); atomicJson(statePath(directory), state); return state; }
 function contextFilesExist(repositoryPath, paths) { for (const item of paths) { const resolved = path.resolve(repositoryPath, item); const stat = fs.lstatSync(resolved); if (!inside(repositoryPath, resolved) || !stat.isFile() || stat.isSymbolicLink() || stat.size > 256 * 1024) throw new Error(`context file is unavailable: ${item}`); } }
@@ -34,16 +49,20 @@ function summary(state) {
   const nextAction = counts.eligible ? `Run delivery_cleanup for ${counts.eligible} integrated ticket${counts.eligible === 1 ? "" : "s"}.` : counts.validated ? "Integrate exact validated patches and call delivery_continue." : counts.running ? "Inspect active Herdr agents." : "Inspect retained evidence and resources.";
   return { counts, nextAction };
 }
-async function waitForInitialActivity(herdr, target, resultPath, timeoutMs = 10_000) {
-  const deadline = Date.now() + timeoutMs;
+async function waitForInitialActivity(herdr, target, resultPath, deadlineMs, now = Date.now) {
+  const activityDeadline = Math.min(deadlineMs, now() + 10_000);
   while (true) {
     if (fs.existsSync(resultPath)) return "result";
+    const remainingMs = Math.min(activityDeadline, deadlineMs) - now();
+    if (remainingMs <= 0) return "timeout";
     const status = parseAgentState(await herdr.agentGet(target));
-    if (["working", "blocked"].includes(status)) return status;
-    if (Date.now() >= deadline) throw new Error(`initial ticket prompt produced no working or blocked state; current status ${status}.`);
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    if (["working", "blocked", "done", "idle"].includes(status) && status !== "idle") return status;
+    if (now() >= activityDeadline) throw new Error(`initial ticket prompt produced no working or blocked state; current status ${status}.`);
+    await new Promise((resolve) => setTimeout(resolve, Math.min(100, Math.max(1, deadlineMs - now()))));
   }
 }
+
+export function remainingOperationTimeout(deadlineMs, nowMs = Date.now()) { return Math.min(300_000, Math.max(0, deadlineMs - nowMs)); }
 
 export async function waitForAgentDeadline(herdr, target, deadlineMs, now = Date.now) {
   const startedMs = now();
@@ -74,7 +93,7 @@ async function verifyRepository(repositoryPath, baseSha, worktreeRoot, herdr) {
 
 function owned(ticket, file) { return ticket.ownedPaths.some((claim) => claim.endsWith("/") ? file.startsWith(claim) : file === claim); }
 function validationFeedback(validation) { const text = `${validation.stdout}${validation.stderr}`; const maximum = 8192; return text.length <= maximum ? text : `${text.slice(0, maximum)}\n[truncated; full output in immutable log]`; }
-function handoff(ticket, runtime, worktreePath, branch, agentResult, validation, changes, patchEvidence) { return { version: 2, ticketId: ticket.id, status: agentResult.status, summary: agentResult.summary, handoff: agentResult.handoff, question: agentResult.question ?? null, branch, workspace: runtime.workspace, pane: runtime.pane, target: runtime.target, worktreePath, changedPaths: changes, validation, patchEvidence, promptPath: runtime.promptPath, resultPath: runtime.resultPath, rounds: runtime.rounds, fixCount: runtime.fixCount, deadlineAt: runtime.deadlineAt, waitElapsedMs: runtime.waitElapsedMs, createdAt: new Date().toISOString() }; }
+function handoff(ticket, runtime, worktreePath, branch, agentResult, validation, changes, patchEvidence) { return { version: 2, ticketId: ticket.id, status: agentResult.status, summary: agentResult.summary, handoff: agentResult.handoff, question: agentResult.question ?? null, branch, workspace: runtime.workspace, pane: runtime.pane, target: runtime.target, worktreePath, changedPaths: changes, validation, patchEvidence, promptPath: runtime.promptPath, resultPath: runtime.resultPath, rounds: runtime.rounds, fixCount: runtime.fixCount, deadlineAt: runtime.deadlineAt, waitElapsedMs: runtime.waitElapsedMs, timing: runtime.timing, createdAt: new Date().toISOString() }; }
 
 async function capturePatch(directory, ticket, worktreePath, baseSha, changedPaths) {
   const files = patchPaths(directory, ticket.id); fs.mkdirSync(path.dirname(files.patch), { recursive: true, mode: 0o700 });
@@ -97,48 +116,71 @@ async function verifyIntegratedPatch(root, directory, ticketId, ticket) {
 
 export function createDeliveryWorkflowCore({ herdr = createHerdrAdapter({ env: buildChildEnvironment() }), nonce = () => randomBytes(24).toString("hex") } = {}) {
   async function executeTicket(repositoryPath, directory, run, ticket, state, worktreeRoot) {
-    state.tickets[ticket.id] = { ...state.tickets[ticket.id], status: "running", launchStartedAt: new Date().toISOString() }; save(directory, state);
+    const executionStarted = performance.now(); const deadlineMs = Date.now() + ticket.timeoutSeconds * 1000;
+    const evidence = { contextBytes: 0, startupElapsedMs: 0, workerElapsedMs: 0, validationElapsedMs: 0, fixCount: 0, rounds: [], deadlineAt: new Date(deadlineMs).toISOString() };
+    let created; let target = ticket.worker.name; let worktreePath; let branch; let currentPromptPath; let currentResultPath;
+    const terminal = (outcome) => ({ ...outcome, ...(target ? { target } : {}), ...(created ? { pane: created.pane, workspace: created.workspace } : {}), ...(worktreePath ? { worktreePath, branch } : {}), ...(currentPromptPath ? { promptPath: currentPromptPath, resultPath: currentResultPath } : {}), rounds: evidence.rounds, fixCount: evidence.fixCount, deadlineAt: evidence.deadlineAt, timing: { contextBytes: evidence.contextBytes, startupElapsedMs: evidence.startupElapsedMs, workerElapsedMs: evidence.workerElapsedMs, validationElapsedMs: evidence.validationElapsedMs, totalElapsedMs: Math.max(0, performance.now() - executionStarted), fixCount: evidence.fixCount } });
+    state.tickets[ticket.id] = { ...state.tickets[ticket.id], status: "running", launchStartedAt: new Date().toISOString(), deadlineAt: evidence.deadlineAt, timing: { contextBytes: 0, startupElapsedMs: 0, workerElapsedMs: 0, validationElapsedMs: 0, totalElapsedMs: 0, fixCount: 0 } }; save(directory, state);
     contextFilesExist(repositoryPath, ticket.specPaths);
     const ticketDir = path.join(directory, "tickets", ticket.id); fs.mkdirSync(ticketDir, { recursive: true, mode: 0o700 });
-    const worktreePath = path.join(worktreeRoot, `${run.runId}-${ticket.id}`); const branch = `delivery/${run.runId}-${ticket.id}`;
-    const created = await herdr.worktreeCreate({ cwd: repositoryPath, branch, base: run.baseSha, path: worktreePath, label: `${run.runId} ${ticket.id}`, focus: false });
+    worktreePath = path.join(worktreeRoot, `${run.runId}-${ticket.id}`); branch = `delivery/${run.runId}-${ticket.id}`;
+    created = await herdr.worktreeCreate({ cwd: repositoryPath, branch, base: run.baseSha, path: worktreePath, label: `${run.runId} ${ticket.id}`, focus: false });
     if (path.resolve(created.path) !== path.resolve(worktreePath) || typeof created.pane !== "string" || typeof created.workspace !== "string") throw new Error("Herdr returned unexpected worktree, pane, or workspace.");
-    const promptPath = path.join(directory, "prompts", `${ticket.id}.md`); const resultPath = path.join(directory, "results", `${ticket.id}.json`); const bindingDir = path.join(ticketDir, "result-bindings"); const ticketNonce = nonce();
+    currentPromptPath = path.join(directory, "prompts", `${ticket.id}.md`); currentResultPath = path.join(directory, "results", `${ticket.id}.json`); const bindingDir = path.join(ticketDir, "result-bindings"); const ticketNonce = nonce();
     const dependencyHandoffs = ticket.dependencies.map((dependency) => ({ ticketId: dependency, handoff: state.tickets[dependency].handoff }));
-    const packet = buildContextPacket({ run, ticket, repositoryPath, worktreePath, promptPath, resultPath, nonce: ticketNonce, dependencyHandoffs, guidance: state.guidance?.[ticket.id] ?? "" });
-    fs.mkdirSync(path.dirname(promptPath), { recursive: true, mode: 0o700 }); fs.mkdirSync(path.dirname(resultPath), { recursive: true, mode: 0o700 }); fs.writeFileSync(promptPath, packet, { mode: 0o600, flag: "wx" });
-    exclusiveJson(path.join(bindingDir, "round-0.json"), { version: 1, round: 0, ticketId: ticket.id, nonce: ticketNonce, resultPath });
-    const target = ticket.worker.name; const tools = [...new Set([...ticket.worker.tools, RESULT_TOOL])];
-    state.tickets[ticket.id] = { ...state.tickets[ticket.id], status: "running", target, pane: created.pane, workspace: created.workspace, worktreePath, branch, promptPath, resultPath, startedAt: new Date().toISOString() }; save(directory, state);
-    const initialPrompt = `Read and follow the complete ticket context at ${promptPath}. Call ${RESULT_TOOL} exactly once when settled.`;
-    try { await herdr.agentStart({ name: target, kind: ticket.worker.kind, pane: created.pane, timeout: 300_000, agentArgs: ["--model", ticket.worker.model, "--thinking", ticket.worker.thinking, "--extension", RESULT_EXTENSION, "--delivery-result-path", resultPath, "--delivery-result-nonce", ticketNonce, "--delivery-result-binding-dir", bindingDir, "--tools", tools.join(","), "--", initialPrompt] }); }
-    catch (error) { try { await herdr.worktreeRemove({ workspace: created.workspace }); } catch (cleanupError) { throw new Error(`${error instanceof Error ? error.message : String(error)}; pre-agent cleanup failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`); } throw new Error(`${error instanceof Error ? error.message : String(error)}; newly created worktree/workspace removed before approval-bound work began`); }
-    const deadlineMs = Date.now() + ticket.timeoutSeconds * 1000;
-    const initial = await waitForInitialActivity(herdr, target, resultPath); let wait = initial === "result" ? { timedOut: false, response: await herdr.agentGet(target), deadlineMs, elapsedMs: 0 } : await waitForAgentDeadline(herdr, target, deadlineMs);
-    const rounds = []; let fixCount = 0; let currentPromptPath = promptPath; let currentResultPath = resultPath; let agentResult; let validation; let changes;
-    while (true) {
-      if (wait.timedOut) return { status: "blocked", reason: "ticket deadline expired; agent and workspace retained", target, pane: created.pane, workspace: created.workspace, worktreePath, branch, promptPath: currentPromptPath, resultPath: currentResultPath, rounds, fixCount, deadlineAt: new Date(deadlineMs).toISOString(), waitElapsedMs: wait.elapsedMs };
-      let status = wait.status ?? parseAgentState(wait.response); if (status === "unknown" || !fs.existsSync(currentResultPath)) { const live = await herdr.agentGet(target); status = parseAgentState(live); }
-      if (!["idle", "done", "blocked"].includes(status)) throw new Error(`agent settled in unknown state ${status}.`); if (!fs.existsSync(currentResultPath)) throw new Error(status === "blocked" ? "agent blocked without result file." : "agent settled without result file.");
-      agentResult = validateTicketResult(readJson(currentResultPath, 64 * 1024), ticket.id);
-      if (agentResult.status !== "done") return { status: agentResult.status, reason: agentResult.summary, question: agentResult.question ?? null, handoff: agentResult.handoff ?? "", target, pane: created.pane, workspace: created.workspace, worktreePath, branch, promptPath: currentPromptPath, resultPath: currentResultPath, rounds, fixCount };
-      if (agentResult.validation === "failed") return { status: "failed", reason: "agent reported failed validation", target, pane: created.pane, workspace: created.workspace, worktreePath, branch, promptPath: currentPromptPath, resultPath: currentResultPath, rounds, fixCount };
-      validation = await runValidation(ticket.validation, worktreePath, ticket.validationTimeoutSeconds * 1000); const logPath = path.join(directory, "logs", `${ticket.id}.round-${fixCount}.log`); fs.mkdirSync(path.dirname(logPath), { recursive: true, mode: 0o700 }); fs.writeFileSync(logPath, `${validation.stdout}${validation.stderr}`, { mode: 0o600, flag: "wx" });
-      const head = (await git(worktreePath, ["rev-parse", "HEAD"])).trim(); if (head !== run.baseSha) return { status: "blocked", reason: "worker committed or moved HEAD; only working-tree changes are accepted", target, pane: created.pane, workspace: created.workspace, worktreePath, branch, promptPath: currentPromptPath, resultPath: currentResultPath, rounds, fixCount };
-      changes = parsePorcelainV1Z(await git(worktreePath, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])); const violations = changes.filter((file) => !owned(ticket, file));
-      const round = { round: fixCount, promptPath: currentPromptPath, resultPath: currentResultPath, logPath, validation: { passed: validation.passed, timedOut: validation.timedOut, timeoutMs: validation.timeoutMs, elapsedMs: validation.elapsedMs }, changedPaths: changes }; rounds.push(round);
-      if (violations.length) return { status: "blocked", reason: `ownership violation: ${violations.join(", ")}`, target, pane: created.pane, workspace: created.workspace, worktreePath, branch, promptPath: currentPromptPath, resultPath: currentResultPath, rounds, fixCount };
-      if (validation.passed) break;
-      if (fixCount >= ticket.maxFixRounds) return { status: "failed", reason: validation.timedOut ? "validation deadline expired; fix rounds exhausted" : "validation failed; fix rounds exhausted", target, pane: created.pane, workspace: created.workspace, worktreePath, branch, promptPath: currentPromptPath, resultPath: currentResultPath, validation, rounds, fixCount };
-      fixCount += 1; const fixNonce = nonce(); currentPromptPath = path.join(directory, "prompts", `${ticket.id}.fix-${fixCount}.md`); currentResultPath = path.join(directory, "results", `${ticket.id}.fix-${fixCount}.json`);
-      const feedback = validationFeedback(validation); const fixPrompt = `# Delivery repair round ${fixCount}\n\nRuntime validation ${validation.timedOut ? "timed out" : "failed"}. Repair only ticket ${ticket.id} in same worktree and ownership. Do not commit or widen scope.\n\nValidation: \`${ticket.validation.executable} ${ticket.validation.args.join(" ")}\`\nFull log: \`${logPath}\`\n\nBounded output:\n\`\`\`text\n${feedback}\n\`\`\`\n\nCall \`${RESULT_TOOL}\` exactly once with nonce \`${fixNonce}\`, ticketId \`${ticket.id}\`, and normal version 1 result fields.\n`;
-      fs.writeFileSync(currentPromptPath, fixPrompt, { mode: 0o600, flag: "wx" }); exclusiveJson(path.join(bindingDir, `round-${fixCount}.json`), { version: 1, round: fixCount, ticketId: ticket.id, nonce: fixNonce, resultPath: currentResultPath });
-      const remainingMs = deadlineMs - Date.now(); if (remainingMs <= 0) return { status: "blocked", reason: "ticket deadline expired before repair prompt; agent and workspace retained", target, pane: created.pane, workspace: created.workspace, worktreePath, branch, promptPath: currentPromptPath, resultPath: currentResultPath, rounds, fixCount };
-      try { const response = await herdr.agentPrompt({ target, prompt: `Read and follow repair context at ${currentPromptPath}. Call ${RESULT_TOOL} exactly once when settled.`, wait: true, timeout: Math.min(remainingMs, 300_000) }); wait = { timedOut: false, response, status: parseAgentState(response), deadlineMs, elapsedMs: 0 }; }
-      catch { const live = await herdr.agentGet(target); const liveStatus = parseAgentState(live); wait = liveStatus === "working" ? await waitForAgentDeadline(herdr, target, deadlineMs) : { timedOut: false, response: live, status: liveStatus, deadlineMs, elapsedMs: 0 }; }
+    const packet = buildContextPacket({ run, ticket, repositoryPath, worktreePath, promptPath: currentPromptPath, resultPath: currentResultPath, nonce: ticketNonce, dependencyHandoffs, guidance: state.guidance?.[ticket.id] ?? "" }); evidence.contextBytes = Buffer.byteLength(packet);
+    fs.mkdirSync(path.dirname(currentPromptPath), { recursive: true, mode: 0o700 }); fs.mkdirSync(path.dirname(currentResultPath), { recursive: true, mode: 0o700 }); fs.writeFileSync(currentPromptPath, packet, { mode: 0o600, flag: "wx" });
+    exclusiveJson(path.join(bindingDir, "round-0.json"), { version: 1, round: 0, ticketId: ticket.id, nonce: ticketNonce, resultPath: currentResultPath });
+    const tools = [...new Set([...ticket.worker.tools, RESULT_TOOL])];
+    state.tickets[ticket.id] = { ...state.tickets[ticket.id], status: "running", target, pane: created.pane, workspace: created.workspace, worktreePath, branch, promptPath: currentPromptPath, resultPath: currentResultPath, startedAt: new Date().toISOString(), contextBytes: evidence.contextBytes, timing: { contextBytes: evidence.contextBytes, startupElapsedMs: 0, workerElapsedMs: 0, validationElapsedMs: 0, totalElapsedMs: 0, fixCount: 0 } }; save(directory, state);
+    const initialPrompt = `Read and follow the complete ticket context at ${currentPromptPath}. Call ${RESULT_TOOL} exactly once when settled.`;
+    const startupStarted = performance.now(); const startupRemaining = remainingOperationTimeout(deadlineMs);
+    if (startupRemaining <= 0) return terminal({ status: "blocked", reason: "ticket deadline expired before agent startup; workspace retained" });
+    try { await herdr.agentStart({ name: target, kind: ticket.worker.kind, pane: created.pane, timeout: startupRemaining, agentArgs: ["--model", ticket.worker.model, "--thinking", ticket.worker.thinking, "--extension", RESULT_EXTENSION, "--delivery-result-path", currentResultPath, "--delivery-result-nonce", ticketNonce, "--delivery-result-binding-dir", bindingDir, "--tools", tools.join(","), "--", initialPrompt] }); }
+    catch (error) {
+      evidence.startupElapsedMs = Math.max(0, performance.now() - startupStarted);
+      const message = error instanceof Error ? error.message : String(error); const uncertain = error?.code === "timeout" || Date.now() >= deadlineMs;
+      if (uncertain) return terminal({ status: "blocked", reason: `${message}; agent startup outcome uncertain, workspace retained` });
+      try { await herdr.worktreeRemove({ workspace: created.workspace }); } catch (cleanupError) { return terminal({ status: "blocked", reason: `${message}; pre-agent cleanup failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}` }); }
+      return terminal({ status: "blocked", reason: `${message}; newly created worktree/workspace removed before approval-bound work began` });
     }
-    const patchEvidence = await capturePatch(directory, ticket, worktreePath, run.baseSha, changes); const runtime = { promptPath: currentPromptPath, resultPath: currentResultPath, rounds, fixCount, workspace: created.workspace, pane: created.pane, target, deadlineAt: new Date(deadlineMs).toISOString(), waitElapsedMs: wait.elapsedMs };
-    const value = handoff(ticket, runtime, worktreePath, branch, agentResult, { passed: true, executable: ticket.validation.executable, args: ticket.validation.args, timeoutMs: validation.timeoutMs, elapsedMs: validation.elapsedMs }, changes, patchEvidence); atomicJson(path.join(directory, "handoffs", `${ticket.id}.json`), value); return { ...value, status: "validation_passed" };
+    const activity = await waitForInitialActivity(herdr, target, currentResultPath, deadlineMs); evidence.startupElapsedMs = Math.max(0, performance.now() - startupStarted); state.tickets[ticket.id].timing.startupElapsedMs = evidence.startupElapsedMs; save(directory, state);
+    let wait = activity === "timeout" ? { timedOut: true, deadlineMs, elapsedMs: evidence.startupElapsedMs } : await waitForAgentDeadline(herdr, target, deadlineMs);
+    let roundStarted = startupStarted; let agentResult; let validation; let changes;
+    while (true) {
+      if (wait.timedOut) { evidence.workerElapsedMs += Math.max(0, performance.now() - roundStarted); return terminal({ status: "blocked", reason: "ticket deadline expired; agent and workspace retained", waitElapsedMs: wait.elapsedMs }); }
+      let status = wait.status ?? parseAgentState(wait.response);
+      if (!["idle", "done", "blocked", "working"].includes(status)) { const live = await herdr.agentGet(target); status = parseAgentState(live); }
+      if (status === "working") { wait = await waitForAgentDeadline(herdr, target, deadlineMs); continue; }
+      if (!["idle", "done", "blocked"].includes(status)) return terminal({ status: "blocked", reason: `agent settled in unknown state ${status}.` });
+      const executionElapsedMs = Math.max(0, performance.now() - roundStarted); evidence.workerElapsedMs += executionElapsedMs;
+      const round = { round: evidence.fixCount, promptPath: currentPromptPath, resultPath: currentResultPath, executionElapsedMs, waitElapsedMs: wait.elapsedMs ?? 0 }; evidence.rounds.push(round);
+      if (!fs.existsSync(currentResultPath)) return terminal({ status: "blocked", reason: status === "blocked" ? "agent blocked without result file." : "agent settled without result file." });
+      agentResult = validateTicketResult(readJson(currentResultPath, 64 * 1024), ticket.id);
+      if (agentResult.status !== "done") return terminal({ status: agentResult.status, reason: agentResult.summary, question: agentResult.question ?? null, handoff: agentResult.handoff ?? "" });
+      if (agentResult.validation === "failed") return terminal({ status: "failed", reason: "agent reported failed validation" });
+      validation = await runValidation(ticket.validation, worktreePath, ticket.validationTimeoutSeconds * 1000); evidence.validationElapsedMs += validation.elapsedMs;
+      const logPath = path.join(directory, "logs", `${ticket.id}.round-${evidence.fixCount}.log`); fs.mkdirSync(path.dirname(logPath), { recursive: true, mode: 0o700 }); fs.writeFileSync(logPath, `${validation.stdout}${validation.stderr}`, { mode: 0o600, flag: "wx" });
+      const head = (await git(worktreePath, ["rev-parse", "HEAD"])).trim(); if (head !== run.baseSha) return terminal({ status: "blocked", reason: "worker committed or moved HEAD; only working-tree changes are accepted" });
+      changes = parsePorcelainV1Z(await git(worktreePath, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])); const violations = changes.filter((file) => !owned(ticket, file));
+      Object.assign(round, { logPath, validation: { passed: validation.passed, timedOut: validation.timedOut, timeoutMs: validation.timeoutMs, elapsedMs: validation.elapsedMs }, changedPaths: changes });
+      if (violations.length) return terminal({ status: "blocked", reason: `ownership violation: ${violations.join(", ")}` });
+      if (validation.passed) break;
+      if (evidence.fixCount >= ticket.maxFixRounds) return terminal({ status: "failed", reason: validation.timedOut ? "validation deadline expired; fix rounds exhausted" : "validation failed; fix rounds exhausted", validation });
+      evidence.fixCount += 1; const fixNonce = nonce(); currentPromptPath = path.join(directory, "prompts", `${ticket.id}.fix-${evidence.fixCount}.md`); currentResultPath = path.join(directory, "results", `${ticket.id}.fix-${evidence.fixCount}.json`);
+      const feedback = validationFeedback(validation); const fixPrompt = `# Delivery repair round ${evidence.fixCount}\n\nRuntime validation ${validation.timedOut ? "timed out" : "failed"}. Repair only ticket ${ticket.id} in same worktree and ownership. Do not commit or widen scope.\n\nValidation: \`${ticket.validation.executable} ${ticket.validation.args.join(" ")}\`\nFull log: \`${logPath}\`\n\nBounded output:\n\`\`\`text\n${feedback}\n\`\`\`\n\nCall \`${RESULT_TOOL}\` exactly once with nonce \`${fixNonce}\`, ticketId \`${ticket.id}\`, and normal version 1 result fields.\n`;
+      fs.writeFileSync(currentPromptPath, fixPrompt, { mode: 0o600, flag: "wx" }); exclusiveJson(path.join(bindingDir, `round-${evidence.fixCount}.json`), { version: 1, round: evidence.fixCount, ticketId: ticket.id, nonce: fixNonce, resultPath: currentResultPath });
+      const remainingMs = deadlineMs - Date.now(); if (remainingMs <= 0) return terminal({ status: "blocked", reason: "ticket deadline expired before repair prompt; agent and workspace retained" });
+      roundStarted = performance.now();
+      try {
+        const response = await herdr.agentPrompt({ target, prompt: `Read and follow repair context at ${currentPromptPath}. Call ${RESULT_TOOL} exactly once when settled.`, wait: true, timeout: Math.min(remainingMs, 300_000) });
+        const promptStatus = parseAgentState(response); wait = promptStatus === "working" ? await waitForAgentDeadline(herdr, target, deadlineMs) : { timedOut: false, response, status: promptStatus, deadlineMs, elapsedMs: Math.max(0, performance.now() - roundStarted) };
+      } catch {
+        const live = await herdr.agentGet(target); const liveStatus = parseAgentState(live); wait = liveStatus === "working" ? await waitForAgentDeadline(herdr, target, deadlineMs) : { timedOut: false, response: live, status: liveStatus, deadlineMs, elapsedMs: Math.max(0, performance.now() - roundStarted) };
+      }
+    }
+    const patchEvidence = await capturePatch(directory, ticket, worktreePath, run.baseSha, changes); const runtime = { promptPath: currentPromptPath, resultPath: currentResultPath, rounds: evidence.rounds, fixCount: evidence.fixCount, workspace: created.workspace, pane: created.pane, target, deadlineAt: evidence.deadlineAt, waitElapsedMs: evidence.rounds.reduce((sum, round) => sum + round.waitElapsedMs, 0), timing: terminal({}).timing };
+    const value = handoff(ticket, runtime, worktreePath, branch, agentResult, { passed: true, executable: ticket.validation.executable, args: ticket.validation.args, timeoutMs: validation.timeoutMs, elapsedMs: validation.elapsedMs }, changes, patchEvidence); atomicJson(path.join(directory, "handoffs", `${ticket.id}.json`), value); return { ...value, timing: runtime.timing, status: "validation_passed" };
   }
 
   async function run(repositoryPath, input, existing = false) {
@@ -151,14 +193,14 @@ export function createDeliveryWorkflowCore({ herdr = createHerdrAdapter({ env: b
     const launch = (ticketId) => {
       const ticket = run.tickets.find((item) => item.id === ticketId);
       const promise = (async () => {
-        let outcome; try { outcome = await executeTicket(root, directory, run, ticket, state, input.worktreeRoot); } catch (error) { outcome = { status: "blocked", reason: error instanceof Error ? error.message : String(error) }; }
+        let outcome; try { outcome = await executeTicket(root, directory, run, ticket, state, input.worktreeRoot); } catch (error) { outcome = { status: "blocked", reason: error instanceof Error ? error.message : String(error), ...(state.tickets[ticketId]?.timing ? { timing: state.tickets[ticketId].timing } : {}) }; }
         state.tickets[ticketId] = { ...state.tickets[ticketId], ...outcome, settledAt: new Date().toISOString() }; save(directory, state); return [ticketId, outcome];
       })();
       running.set(ticketId, promise); promise.finally(() => running.delete(ticketId));
     };
     try {
       while (true) {
-        if (state.stopRequested) launchBlocked = true;
+        if (state.stopRequested || Object.values(state.tickets).some((ticket) => ["blocked", "failed", "stopped"].includes(ticket.status))) launchBlocked = true;
         if (!launchBlocked) {
           const slots = run.maxConcurrency - running.size;
           for (const ticketId of readyTickets(run.tickets, state.tickets).slice(0, slots)) launch(ticketId);

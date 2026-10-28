@@ -3,7 +3,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { runValidation, waitForAgentDeadline } from "../extensions/delivery-workflow-core.mjs";
+import { remainingOperationTimeout, runValidation, waitForAgentDeadline } from "../extensions/delivery-workflow-core.mjs";
+
+test("startup operation uses only remaining ticket deadline and public ceiling", () => {
+  assert.equal(remainingOperationTimeout(60_000, 10_000), 50_000); assert.equal(remainingOperationTimeout(500_000, 10_000), 300_000); assert.equal(remainingOperationTimeout(10_000, 10_001), 0);
+});
 
 test("wait slices remaining ticket deadline and reconciles live state", async () => {
   let clock = 0; let gets = 0; const waits = [];
@@ -37,4 +41,12 @@ test("validation has explicit timeout and elapsed evidence", async () => {
   assert.equal(result.timedOut, true);
   assert.equal(result.timeoutMs, 30);
   assert.ok(result.elapsedMs >= 20);
+});
+
+test("validation timeout terminates descendant process group", { skip: process.platform === "win32" }, async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "delivery-validation-tree-")); const pidFile = path.join(root, "child.pid");
+  const script = `const {spawn}=require('node:child_process');const fs=require('node:fs');const c=spawn(process.execPath,['-e',\"process.on('SIGTERM',()=>{});setInterval(()=>{},1000)\"],{stdio:['ignore','inherit','inherit']});fs.writeFileSync(${JSON.stringify(pidFile)},String(c.pid));setInterval(()=>{},1000)`;
+  const started = Date.now(); const result = await runValidation({ executable: process.execPath, args: ["-e", script] }, root, 40);
+  assert.equal(result.timedOut, true); assert.ok(Date.now() - started < 1500); const childPid = Number(fs.readFileSync(pidFile, "utf8"));
+  await new Promise((resolve) => setTimeout(resolve, 50)); assert.throws(() => process.kill(childPid, 0), (error) => error?.code === "ESRCH");
 });
