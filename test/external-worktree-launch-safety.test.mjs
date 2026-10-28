@@ -134,6 +134,26 @@ test("approve disposition validates review and pending downstream paths before m
   }
 });
 
+test("approve disposition with zero pending tickets validates root and review path before byte-equivalent failure", async () => {
+  for (const invalid of ["root", "review"]) {
+    const f = fixture(); const directory = path.join(f.root, ".scratch", "delivery", "safe-run"); fs.mkdirSync(directory, { recursive: true });
+    const run = { version: 2, ...input(f), tickets: [
+      { ...input(f).tickets[0], id: "R1", mode: "review", ownedPaths: [], readPaths: ["spec.md"], worker: { ...input(f).tickets[0].worker, name: "reviewer" } },
+    ] };
+    const state = { version: 2, runId: "safe-run", baseSha: f.baseSha, phase: "awaiting_disposition", tickets: {
+      R1: { status: "reviewed", verdict: "approve", worktreePath: invalid === "review" ? f.root : path.join(f.worktreeRoot, "safe-run-R1"), reviewEvidence: { parentUnchanged: true, worktreeUnchanged: true } },
+    } };
+    fs.writeFileSync(path.join(directory, "run.json"), `${JSON.stringify(run, null, 2)}\n`); fs.writeFileSync(path.join(directory, "status.json"), `${JSON.stringify(state, null, 2)}\n`);
+    if (invalid === "root") fs.rmSync(f.worktreeRoot, { recursive: true, force: true });
+    const beforeRun = fs.readFileSync(path.join(directory, "run.json")); const beforeStatus = fs.readFileSync(path.join(directory, "status.json"));
+    try {
+      const output = await createDeliveryWorkflowCore({ herdr: herdr() }).dispose(f.root, { runId: "safe-run", ticketId: "R1", disposition: "approve" });
+      assert.equal(output.isError, true); assert.equal(output.details.status, "blocked"); assert.deepEqual(output.details.safeActions, ["inspect_and_retain"]); assert.match(output.content[0].text, invalid === "root" ? /worktreeRoot/ : /worktree path/);
+      assert.deepEqual(fs.readFileSync(path.join(directory, "run.json")), beforeRun); assert.deepEqual(fs.readFileSync(path.join(directory, "status.json")), beforeStatus);
+    } finally { cleanup(f); }
+  }
+});
+
 test("reconcile accepts legacy persisted root and blocks recorded path outside it", async () => {
   const f = fixture(); const directory = path.join(f.root, ".scratch", "delivery", "legacy-run"); fs.mkdirSync(directory, { recursive: true });
   fs.writeFileSync(path.join(directory, "run.json"), JSON.stringify({ version: 2, runId: "legacy-run", baseSha: f.baseSha, worktreeRoot: f.worktreeRoot, tickets: [] }));
