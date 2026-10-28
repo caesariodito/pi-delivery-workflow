@@ -135,6 +135,22 @@ async function verifyIntegratedPatch(root, directory, ticketId, ticket) {
   return { patchSha256: metadata.sha256, method: patch.length ? "git-apply-check-reverse" : "empty-patch" };
 }
 
+async function parentSnapshot(root) {
+  const head = (await git(root, ["rev-parse", "HEAD"])).trim();
+  const status = await git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
+  return { head, clean: status.length === 0, statusSha256: digest(status), statusBytes: Buffer.byteLength(status) };
+}
+
+async function validateIntegration(root, directory, run, integratedSha) {
+  const before = await parentSnapshot(root);
+  if (before.head !== integratedSha || !before.clean) throw new Error("Integration validation requires clean integrated parent HEAD.");
+  const validation = await runValidation(run.integrationValidation, root, run.integrationValidation.timeoutSeconds * 1000);
+  const logPath = path.join(directory, "logs", `integration-${integratedSha}.log`); fs.mkdirSync(path.dirname(logPath), { recursive: true, mode: 0o700 }); fs.writeFileSync(logPath, `${validation.stdout}${validation.stderr}`, { mode: 0o600, flag: "wx" });
+  const after = await parentSnapshot(root);
+  const evidence = { executable: run.integrationValidation.executable, args: run.integrationValidation.args, cwd: run.integrationValidation.cwd ?? ".", timeoutMs: validation.timeoutMs, elapsedMs: validation.elapsedMs, passed: validation.passed, timedOut: validation.timedOut, outputExceeded: validation.outputExceeded, code: validation.code, stdoutBytes: Buffer.byteLength(validation.stdout), stderrBytes: Buffer.byteLength(validation.stderr), logPath, integratedSha, before, after, validatedAt: new Date().toISOString() };
+  return { evidence, accepted: validation.passed && after.head === integratedSha && after.clean, reason: after.head !== integratedSha ? "integration validation moved parent HEAD" : !after.clean ? "integration validation mutated parent checkout" : validation.timedOut ? "integration validation timed out" : validation.outputExceeded ? "integration validation exceeded output bound" : "integration validation failed" };
+}
+
 export function createDeliveryWorkflowCore({ herdr = createHerdrAdapter({ env: buildChildEnvironment() }), nonce = () => randomBytes(24).toString("hex") } = {}) {
   async function executeTicket(repositoryPath, directory, run, ticket, state, worktreeRoot) {
     const executionStarted = performance.now(); const deadlineMs = Date.now() + ticket.timeoutSeconds * 1000;
@@ -250,6 +266,13 @@ export function createDeliveryWorkflowCore({ herdr = createHerdrAdapter({ env: b
     async continue(repositoryPath, input) { const directory = runDir(repositoryPath, input.runId); if (active.has(directory)) return result("Run is already active.", { status: "active" }, true); const savedRun = readJson(path.join(directory, "run.json")); const state = readJson(statePath(directory)); if (savedRun.version !== 2 || state.version !== 2) return result("Legacy run lacks immutable patch evidence and cannot continue.", { status: "blocked" }, true); if (state.phase !== "awaiting_integration") return result("Run is not awaiting integration.", { status: state.phase }, true); const root = fs.realpathSync(repositoryPath); if (input.integratedSha === state.baseSha || (await git(root, ["rev-parse", "HEAD"])).trim() !== input.integratedSha || (await git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])).length) return result("Integrated SHA must be a new clean current parent HEAD.", { status: "blocked" }, true); try { await git(root, ["merge-base", "--is-ancestor", state.baseSha, input.integratedSha]); } catch { return result("Integrated SHA must descend from prior base SHA.", { status: "blocked" }, true); }
       const candidates = Object.entries(state.tickets).filter(([, ticket]) => ticket.status === "validation_passed"); const verified = [];
       try { for (const [ticketId, ticket] of candidates) verified.push([ticketId, await verifyIntegratedPatch(root, directory, ticketId, ticket)]); } catch (error) { return result(error instanceof Error ? error.message : String(error), { status: "blocked" }, true); }
+      if (savedRun.integrationValidation) {
+        let integrationValidation;
+        try { integrationValidation = await validateIntegration(root, directory, savedRun, input.integratedSha); }
+        catch (error) { state.phase = "blocked"; state.integrationValidation = { passed: false, reason: error instanceof Error ? error.message : String(error), integratedSha: input.integratedSha, validatedAt: new Date().toISOString() }; state.nextAction = "Inspect integration validation evidence; no downstream tickets launched."; save(directory, state); return result(state.integrationValidation.reason, state, true); }
+        state.integrationValidation = integrationValidation.evidence;
+        if (!integrationValidation.accepted) { state.phase = "blocked"; state.integrationValidation.reason = integrationValidation.reason; state.nextAction = "Inspect integration validation evidence; no downstream tickets launched."; save(directory, state); return result(integrationValidation.reason, state, true); }
+      }
       for (const [ticketId, evidence] of verified) state.tickets[ticketId] = { ...state.tickets[ticketId], status: "integrated", integrationEvidence: { ...evidence, integratedSha: input.integratedSha, verifiedAt: new Date().toISOString() } };
       savedRun.baseSha = input.integratedSha; state.baseSha = input.integratedSha; state.phase = "running"; save(directory, state); atomicJson(path.join(directory, "run.json"), savedRun); const next = await run(root, savedRun, true); return result(`Delivery ${input.runId}: ${next.phase}. ${next.nextAction}`, next, next.phase === "blocked"); },
     async cleanup(repositoryPath, input) { const directory = runDir(repositoryPath, input.runId); if (active.has(directory)) return result("Run is active; cleanup refused.", { status: "blocked", cleaned: [], alreadyCleaned: [], retained: [{ ticketId: "*", reason: "run active" }] }, true); const state = readJson(statePath(directory)); if (state.version !== 2) return result("Legacy run lacks immutable patch evidence; cleanup refused.", { status: "blocked", cleaned: [], alreadyCleaned: [], retained: [{ ticketId: "*", reason: "legacy evidence" }] }, true); const root = fs.realpathSync(repositoryPath); if ((await git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])).length) return result("Parent checkout must be clean; cleanup refused.", { status: "blocked", cleaned: [], alreadyCleaned: [], retained: [{ ticketId: "*", reason: "dirty parent" }] }, true); await herdr.status(); const live = await herdr.workspaceList(); if (!Array.isArray(live.workspaces)) return result("Herdr workspace state is malformed; cleanup refused.", { status: "blocked", cleaned: [], alreadyCleaned: [], retained: [{ ticketId: "*", reason: "unknown Herdr state" }] }, true); const byId = new Map(live.workspaces.map((workspace) => [workspace.workspace_id, workspace])); const cleaned = []; const alreadyCleaned = []; const retained = [];
