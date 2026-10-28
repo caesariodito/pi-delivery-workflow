@@ -39,7 +39,7 @@ test("notifies only after blocked outcome persistence and keeps launch no-focus"
   const fixture = repository(); const calls = [];
   const herdr = {
     async status() {}, async integrationStatus() { return [{ name: "pi", status: "current (v1)" }]; },
-    async worktreeCreate(options) { calls.push(["create", options]); assert.equal(options.focus, false); assert.equal("rename" in options, false); return { path: options.path, pane: "w1:p1", workspace: "w1" }; },
+    async worktreeCreate(options) { calls.push(["create", options]); assert.equal(options.focus, false); assert.equal("rename" in options, false); execFileSync("git", ["worktree", "add", "--detach", options.path, fixture.sha], { cwd: fixture.root }); return { path: options.path, pane: "w1:p1", workspace: "w1" }; },
     async agentStart() { throw new Error("launch failed"); }, async agentGet() { return { agent: { agent_status: "blocked" } }; },
     async workspaceList() { return { workspaces: [{ workspace_id: "w1", worktree: { checkout_path: path.join(fixture.worktreeRoot, "notify-run-T1") } }] }; },
     async notify(options) { calls.push(["notify", options]); assert.equal(persistedTicket(fixture).status, "blocked"); return { type: "ok" }; },
