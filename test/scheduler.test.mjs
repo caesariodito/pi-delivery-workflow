@@ -23,6 +23,26 @@ test("validates graph, ownership, cycles, and readiness", () => {
   const unsupported = input(); unsupported.tickets[0].worker.kind = "codex"; assert.throws(() => validateRunInput(unsupported), /must be pi, worker, or reviewer/);
 });
 
+test("review dependencies proceed only after parent approve disposition", () => {
+  const value = input(); value.tickets[0] = { ...value.tickets[0], mode: "review", ownedPaths: [], readPaths: ["src/a.js"], worker: { ...value.tickets[0].worker, tools: ["read"] } }; value.tickets[2].dependencies = ["T1"];
+  const run = validateRunInput(value);
+  for (const status of ["reviewed", "disposed", "cleaned"]) {
+    const states = { T1: { status }, T2: { status: "pending" }, T3: { status: "pending" } };
+    if (status !== "reviewed") states.T1.disposition = "changes_requested";
+    assert.deepEqual(readyTickets(run.tickets, states), ["T2"]);
+    assert.equal(blockedByIntegration(run.tickets, states), false);
+  }
+  for (const disposition of ["changes_requested", "blocked"]) {
+    const states = { T1: { status: "disposed", disposition }, T2: { status: "pending" }, T3: { status: "pending" } };
+    assert.deepEqual(readyTickets(run.tickets, states), ["T2"]);
+  }
+  for (const status of ["disposed", "cleaned"]) {
+    const states = { T1: { status, disposition: "approve" }, T2: { status: "pending" }, T3: { status: "pending" } };
+    assert.deepEqual(readyTickets(run.tickets, states), ["T2", "T3"]);
+    assert.equal(blockedByIntegration(run.tickets, states), false);
+  }
+});
+
 test("normalizes strict implementation and review modes", () => {
   assert.equal(validateRunInput(input()).tickets[0].mode, "implementation");
   const value = input(); const review = value.tickets[0]; value.tickets = [review];

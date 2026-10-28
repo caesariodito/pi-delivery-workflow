@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { preflightWarnings, previewTicketGraph, renderTicketGraphMarkdown, unweightedCriticalPath, validateRunInput } from "../extensions/lib/scheduler.mjs";
+import { preflightWarnings, previewTicketGraph, readyTickets, renderTicketGraphMarkdown, unweightedCriticalPath, validateRunInput } from "../extensions/lib/scheduler.mjs";
 
 function input() {
   return {
@@ -41,6 +41,14 @@ test("preview is stable and exposes graph, slots, gates, scopes, commands, worke
   assert.equal(preview.graph.nodes[1].maxFixRounds, 1); assert.deepEqual(preview.graph.nodes[2].readPaths, ["src/"]);
   assert.ok(preview.stopConditions.includes("unknown Herdr state"));
   assert.equal(JSON.stringify(previewTicketGraph(run)), JSON.stringify(preview));
+});
+
+test("preview preserves submitted root order for initial execution slots", () => {
+  const value = input(); value.maxConcurrency = 1; value.tickets = [value.tickets[2], value.tickets[1], value.tickets[0], value.tickets[3]];
+  const run = validateRunInput(value); const preview = previewTicketGraph(run);
+  assert.deepEqual(preview.graph.nodes.map(({ id }) => id), ["A", "B", "C", "D"]);
+  assert.deepEqual(preview.initialSlots, readyTickets(run.tickets, {}).slice(0, run.maxConcurrency));
+  assert.deepEqual(preview.initialSlots, ["D"]);
 });
 
 test("markdown deterministically renders preview details", () => {

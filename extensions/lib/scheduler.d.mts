@@ -6,7 +6,7 @@ export type ThinWorker = Readonly<{ name: string; kind: string; model: string; t
 export type TicketMode = "implementation" | "review";
 export type ThinTicket = Readonly<{ id: string; mode: TicketMode; goal: string; definitionOfDone: string; dependencies: readonly string[]; ownedPaths: readonly string[]; readPaths?: readonly string[]; forbiddenScope: string; worker: ThinWorker; validation: CommandSpec; requiresIntegratedBase: boolean; specPaths: readonly string[]; maxFixRounds: number; timeoutSeconds: number; validationTimeoutSeconds: number; context?: TicketContext }>;
 export type ThinRun = Readonly<{ runId: string; objective: string; baseSha: string; tickets: readonly ThinTicket[]; maxConcurrency: number; contextPaths: readonly string[]; integrationValidation?: IntegrationValidation }>;
-export type ThinTicketState = { status: "pending" | "running" | "validation_passed" | "integrated" | "cleaned" | "blocked" | "failed" | "stopped"; handoff?: string };
+export type ThinTicketState = { status: "pending" | "running" | "reviewed" | "disposed" | "validation_passed" | "integrated" | "cleaned" | "blocked" | "failed" | "stopped"; disposition?: "approve" | "changes_requested" | "blocked"; handoff?: string };
 
 export function validateTicketGraph(value: unknown): readonly ThinTicket[];
 export function validateRunInput(value: unknown): ThinRun;

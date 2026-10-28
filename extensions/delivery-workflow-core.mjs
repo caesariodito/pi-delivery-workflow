@@ -5,7 +5,7 @@ import { execFile, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createHash, randomBytes } from "node:crypto";
 import { buildChildEnvironment, createHerdrAdapter } from "./lib/herdr.mjs";
-import { buildContextPacket, parsePorcelainV1Z, validateRunInput, validateTicketResult } from "./lib/scheduler.mjs";
+import { blockedByIntegration, buildContextPacket, parsePorcelainV1Z, readyTickets, validateRunInput, validateTicketResult } from "./lib/scheduler.mjs";
 
 export const WORKER_MODEL = "9router/cx/gpt-5.6-sol";
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -53,11 +53,6 @@ function summary(state) {
   const nextAction = counts.reviewed ? `Run delivery_dispose for ${counts.reviewed} reviewed ticket${counts.reviewed === 1 ? "" : "s"}.` : counts.eligible ? `Run delivery_cleanup for ${counts.eligible} eligible ticket${counts.eligible === 1 ? "" : "s"}.` : counts.validated ? "Integrate exact validated patches and call delivery_continue." : counts.running ? "Inspect active Herdr agents." : "Inspect retained evidence and resources.";
   return { counts, nextAction };
 }
-function dependencyApproved(state) { return state?.status === "disposed" && state.disposition === "approve"; }
-function dependencyValidated(state) { return ["validation_passed", "integrated", "cleaned"].includes(state?.status) || dependencyApproved(state); }
-function dependencyIntegrated(state) { return ["integrated", "cleaned"].includes(state?.status) || dependencyApproved(state); }
-function coreReadyTickets(tickets, states) { return tickets.filter((ticket) => (states[ticket.id]?.status ?? "pending") === "pending" && ticket.dependencies.every((id) => dependencyValidated(states[id])) && (!ticket.requiresIntegratedBase || ticket.dependencies.every((id) => dependencyIntegrated(states[id])))).map((ticket) => ticket.id); }
-function coreBlockedByIntegration(tickets, states) { return tickets.some((ticket) => (states[ticket.id]?.status ?? "pending") === "pending" && ticket.dependencies.every((id) => dependencyValidated(states[id])) && ticket.requiresIntegratedBase && ticket.dependencies.some((id) => !dependencyIntegrated(states[id]))); }
 async function waitForInitialActivity(herdr, target, resultPath, deadlineMs, now = Date.now) {
   const activityDeadline = Math.min(deadlineMs, now() + 10_000);
   while (true) {
@@ -267,7 +262,7 @@ export function createDeliveryWorkflowCore({ herdr = createHerdrAdapter({ env: b
         if (state.stopRequested || Object.values(state.tickets).some((ticket) => ["blocked", "failed", "stopped"].includes(ticket.status))) launchBlocked = true;
         if (!launchBlocked) {
           const slots = run.maxConcurrency - running.size;
-          for (const ticketId of coreReadyTickets(run.tickets, state.tickets).slice(0, slots)) launch(ticketId);
+          for (const ticketId of readyTickets(run.tickets, state.tickets).slice(0, slots)) launch(ticketId);
         }
         if (!running.size) break;
         const [, outcome] = await Promise.race(running.values());
@@ -275,7 +270,7 @@ export function createDeliveryWorkflowCore({ herdr = createHerdrAdapter({ env: b
       }
       if (state.stopRequested) { state.phase = "stopped"; state.nextAction = "Inspect retained Herdr panes/worktrees."; save(directory, state); }
       else if (launchBlocked) { state.phase = "blocked"; state.nextAction = "Inspect retained Herdr pane/worktree and resolve blocker."; save(directory, state); }
-      else { const pending = Object.values(state.tickets).some((ticket) => ticket.status === "pending"); const reviewed = Object.values(state.tickets).some((ticket) => ticket.status === "reviewed"); const awaiting = pending && coreBlockedByIntegration(run.tickets, state.tickets); const unintegrated = Object.values(state.tickets).some((ticket) => ticket.status === "validation_passed"); const integrated = Object.values(state.tickets).some((ticket) => ticket.status === "integrated"); state.phase = reviewed ? "awaiting_disposition" : awaiting || unintegrated ? "awaiting_integration" : pending ? "blocked" : integrated ? "awaiting_cleanup" : "done"; Object.assign(state, summary(state)); save(directory, state); }
+      else { const pending = Object.values(state.tickets).some((ticket) => ticket.status === "pending"); const reviewed = Object.values(state.tickets).some((ticket) => ticket.status === "reviewed"); const awaiting = pending && blockedByIntegration(run.tickets, state.tickets); const unintegrated = Object.values(state.tickets).some((ticket) => ticket.status === "validation_passed"); const integrated = Object.values(state.tickets).some((ticket) => ticket.status === "integrated"); state.phase = reviewed ? "awaiting_disposition" : awaiting || unintegrated ? "awaiting_integration" : pending ? "blocked" : integrated ? "awaiting_cleanup" : "done"; Object.assign(state, summary(state)); save(directory, state); }
       return state;
     } finally { active.delete(directory); }
   }

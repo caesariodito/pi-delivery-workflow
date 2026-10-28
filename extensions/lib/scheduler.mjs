@@ -109,8 +109,9 @@ export function validateRunInput(value) {
   return Object.freeze({ runId: value.runId, objective: value.objective, baseSha: value.baseSha, tickets: validateTicketGraph(value.tickets), maxConcurrency: value.maxConcurrency ?? 4, contextPaths: Object.freeze((value.contextPaths ?? []).map((item) => relative(item, "contextPath"))), ...(value.integrationValidation === undefined ? {} : { integrationValidation: integrationValidation(value.integrationValidation) }) });
 }
 
-function validated(state) { return ["validation_passed", "integrated", "cleaned"].includes(state?.status); }
-function integrated(state) { return ["integrated", "cleaned"].includes(state?.status); }
+function approvedReview(state) { return ["disposed", "cleaned"].includes(state?.status) && state.disposition === "approve"; }
+function validated(state) { return ["validation_passed", "integrated"].includes(state?.status) || (state?.status === "cleaned" && state.disposition === undefined) || approvedReview(state); }
+function integrated(state) { return state?.status === "integrated" || (state?.status === "cleaned" && state.disposition === undefined) || approvedReview(state); }
 
 export function readyTickets(tickets, states) {
   return tickets.filter((ticket) => (states[ticket.id]?.status ?? "pending") === "pending" && ticket.dependencies.every((dependency) => validated(states[dependency])) && (!ticket.requiresIntegratedBase || ticket.dependencies.every((dependency) => integrated(states[dependency])))).map((ticket) => ticket.id);
@@ -176,7 +177,7 @@ export function previewTicketGraph(run) {
     timeoutSeconds: ticket.timeoutSeconds,
   }));
   const edges = tickets.flatMap((ticket) => [...ticket.dependencies].sort().map((dependency) => Object.freeze({ from: dependency, to: ticket.id })));
-  const initialSlots = tickets.filter((ticket) => ticket.dependencies.length === 0).slice(0, run.maxConcurrency).map((ticket) => ticket.id);
+  const initialSlots = run.tickets.filter((ticket) => ticket.dependencies.length === 0).slice(0, run.maxConcurrency).map((ticket) => ticket.id);
   const integrationGates = tickets.filter((ticket) => ticket.requiresIntegratedBase && ticket.dependencies.length).map((ticket) => Object.freeze({ ticketId: ticket.id, after: Object.freeze([...ticket.dependencies].sort()) }));
   const reviewGates = tickets.filter((ticket) => ticket.mode === "review").map((ticket) => Object.freeze({ ticketId: ticket.id, dispositionRequired: "approve", dependenciesProceedOnlyAfterApproval: true }));
   return Object.freeze({
