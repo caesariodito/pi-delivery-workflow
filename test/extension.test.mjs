@@ -23,10 +23,11 @@ function runInput(sha, worktreeRoot) { return { runId: "run-1", objective: "Test
 
 test("registers thin supervised tool surface", () => {
   const pi = fakePi(); deliveryWorkflow(pi);
-  assert.deepEqual([...pi.tools.keys()].sort(), ["delivery_cleanup", "delivery_continue", "delivery_dispose", "delivery_preview", "delivery_start", "delivery_status", "delivery_steer", "delivery_stop"]);
+  assert.deepEqual([...pi.tools.keys()].sort(), ["delivery_cleanup", "delivery_continue", "delivery_dispose", "delivery_preview", "delivery_reconcile", "delivery_start", "delivery_status", "delivery_steer", "delivery_stop"]);
   assert.deepEqual(pi.tools.get("delivery_cleanup").annotations, { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false });
   assert.deepEqual(pi.tools.get("delivery_preview").annotations, { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false });
-  assert.equal(pi.commands.has("delivery"), true); assert.equal(pi.commands.has("delivery_preview"), true); assert.equal(pi.commands.has("delivery_dispose"), true); assert.equal(pi.tools.has("delivery_recover"), false); assert.equal(pi.tools.has("delivery_reply"), false); assert.equal(pi.tools.has("delivery_review"), false);
+  assert.deepEqual(pi.tools.get("delivery_reconcile").annotations, { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false });
+  assert.equal(pi.commands.has("delivery"), true); assert.equal(pi.commands.has("delivery_reconcile"), true); assert.equal(pi.commands.has("delivery_preview"), true); assert.equal(pi.commands.has("delivery_dispose"), true); assert.equal(pi.tools.has("delivery_recover"), false); assert.equal(pi.tools.has("delivery_reply"), false); assert.equal(pi.tools.has("delivery_review"), false);
 });
 
 test("delivery_start TypeBox schema enforces inclusive integer bounds and rejects unknown fields", () => {
