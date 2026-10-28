@@ -14,6 +14,11 @@ export type ReconcileTicketAnalysis = Readonly<{ ticketId: string; persistedStat
 export type ReconcileAnalysis = Readonly<{ version: 1; tickets: readonly ReconcileTicketAnalysis[]; hasContradictions: boolean; inferredSuccess: false }>;
 
 export function analyzeReconciliation(input: { persistedTickets?: Record<string, ThinTicketState>; liveTickets?: Record<string, ReconcileObservation>; evidenceTickets?: Record<string, ReconcileObservation>; gitTickets?: Record<string, ReconcileObservation> }): ReconcileAnalysis;
+export type WeightedCriticalPath = Readonly<{ ticketIds: readonly string[] | null; durationMs: number | null; incomplete: boolean; missingTiming: readonly string[] }>;
+export type RunMetrics = Readonly<{ wallTimeMs: number | null; workerTimeMs: number | null; utilization: number | null; criticalPath: WeightedCriticalPath; counts: Readonly<{ validations: number; fixes: number; blocks: number; reviews: number; cleanups: number }>; incomplete: Readonly<{ wallTime: boolean; workerTime: boolean; utilization: boolean; criticalPath: boolean }>; missingTiming: Readonly<{ wall: readonly string[]; worker: readonly string[]; criticalPath: readonly string[] }> }>;
+export type RunMetricState = Readonly<{ status?: string; queuedAt?: string; settledAt?: string; reviewedAt?: string; disposedAt?: string; cleanupEvidence?: Readonly<{ cleanedAt?: string }>; timing?: Readonly<{ workerElapsedMs?: number; totalElapsedMs?: number }>; rounds?: readonly Readonly<{ validation?: unknown }>[]; fixCount?: number; reviewResult?: unknown }>;
+export function weightedCriticalPath(tickets: readonly Pick<ThinTicket, "id" | "dependencies">[], states: Record<string, RunMetricState>): WeightedCriticalPath;
+export function analyzeRunMetrics(input: { tickets: readonly Pick<ThinTicket, "id" | "mode" | "dependencies">[]; states: Record<string, RunMetricState>; maxConcurrency?: number }): RunMetrics;
 export function validateTicketGraph(value: unknown): readonly ThinTicket[];
 export function validateRunInput(value: unknown): ThinRun;
 export function readyTickets(tickets: readonly ThinTicket[], states: Record<string, ThinTicketState>): string[];

@@ -150,6 +150,57 @@ export function analyzeReconciliation({ persistedTickets = {}, liveTickets = {},
   return Object.freeze({ version: 1, tickets: Object.freeze(tickets), hasContradictions: tickets.some((ticket) => ticket.contradictions.length > 0), inferredSuccess: false });
 }
 
+function milliseconds(value) {
+  const parsed = typeof value === "string" ? Date.parse(value) : NaN;
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+export function weightedCriticalPath(tickets, states) {
+  const byId = new Map(tickets.map((ticket) => [ticket.id, ticket]));
+  const missingTiming = [...byId.keys()].filter((ticketId) => !Number.isFinite(states[ticketId]?.timing?.totalElapsedMs) || states[ticketId].timing.totalElapsedMs < 0).sort();
+  if (missingTiming.length) return Object.freeze({ ticketIds: null, durationMs: null, incomplete: true, missingTiming: Object.freeze(missingTiming) });
+  const memo = new Map();
+  const pathTo = (ticketId) => {
+    if (memo.has(ticketId)) return memo.get(ticketId);
+    const dependencies = [...byId.get(ticketId).dependencies].sort();
+    const prefix = dependencies.map(pathTo).sort((a, b) => b.durationMs - a.durationMs || a.ticketIds.join("\0").localeCompare(b.ticketIds.join("\0")))[0] ?? { ticketIds: [], durationMs: 0 };
+    const result = { ticketIds: [...prefix.ticketIds, ticketId], durationMs: prefix.durationMs + states[ticketId].timing.totalElapsedMs }; memo.set(ticketId, result); return result;
+  };
+  const winner = [...byId.keys()].sort().map(pathTo).sort((a, b) => b.durationMs - a.durationMs || a.ticketIds.join("\0").localeCompare(b.ticketIds.join("\0")))[0] ?? { ticketIds: [], durationMs: 0 };
+  return Object.freeze({ ticketIds: Object.freeze(winner.ticketIds), durationMs: winner.durationMs, incomplete: false, missingTiming: Object.freeze([]) });
+}
+
+export function analyzeRunMetrics({ tickets, states, maxConcurrency = 1 }) {
+  if (!Array.isArray(tickets) || !states || typeof states !== "object" || Array.isArray(states)) throw new TypeError("metrics tickets and states are invalid.");
+  if (!Number.isSafeInteger(maxConcurrency) || maxConcurrency < 1) throw new TypeError("metrics maxConcurrency must be a positive integer.");
+  const missingWallTiming = []; const missingWorkerTiming = []; const starts = []; const ends = [];
+  let workerTimeMs = 0; let validationCount = 0; let fixCount = 0; let blockCount = 0; let reviewCount = 0; let cleanupCount = 0;
+  for (const ticket of tickets) {
+    const state = states[ticket.id] ?? {};
+    const start = milliseconds(state.queuedAt); const endValues = [state.cleanupEvidence?.cleanedAt, state.disposedAt, state.reviewedAt, state.settledAt].map(milliseconds).filter((value) => value !== null); const end = endValues.length ? Math.max(...endValues) : null;
+    if (start === null || end === null || end < start) missingWallTiming.push(ticket.id); else { starts.push(start); ends.push(end); }
+    if (!Number.isFinite(state.timing?.workerElapsedMs) || state.timing.workerElapsedMs < 0) missingWorkerTiming.push(ticket.id); else workerTimeMs += state.timing.workerElapsedMs;
+    validationCount += Array.isArray(state.rounds) ? state.rounds.filter((round) => round?.validation).length : 0;
+    if (Number.isSafeInteger(state.fixCount) && state.fixCount >= 0) fixCount += state.fixCount;
+    if (state.status === "blocked") blockCount += 1;
+    if (ticket.mode === "review" && (state.reviewedAt || state.reviewResult || ["reviewed", "disposed", "cleaned"].includes(state.status))) reviewCount += 1;
+    if (state.status === "cleaned" || state.cleanupEvidence?.cleanedAt) cleanupCount += 1;
+  }
+  const wallTimeMs = missingWallTiming.length || !starts.length ? null : Math.max(...ends) - Math.min(...starts);
+  const workerComplete = missingWorkerTiming.length === 0;
+  const utilization = wallTimeMs !== null && wallTimeMs > 0 && workerComplete ? workerTimeMs / (wallTimeMs * maxConcurrency) : null;
+  const criticalPath = weightedCriticalPath(tickets, states);
+  return Object.freeze({
+    wallTimeMs,
+    workerTimeMs: workerComplete ? workerTimeMs : null,
+    utilization,
+    criticalPath,
+    counts: Object.freeze({ validations: validationCount, fixes: fixCount, blocks: blockCount, reviews: reviewCount, cleanups: cleanupCount }),
+    incomplete: Object.freeze({ wallTime: wallTimeMs === null, workerTime: !workerComplete, utilization: utilization === null, criticalPath: criticalPath.incomplete }),
+    missingTiming: Object.freeze({ wall: Object.freeze(missingWallTiming.sort()), worker: Object.freeze(missingWorkerTiming.sort()), criticalPath: criticalPath.missingTiming }),
+  });
+}
+
 export function readyTickets(tickets, states) {
   return tickets.filter((ticket) => (states[ticket.id]?.status ?? "pending") === "pending" && ticket.dependencies.every((dependency) => validated(states[dependency])) && (!ticket.requiresIntegratedBase || ticket.dependencies.every((dependency) => integrated(states[dependency])))).map((ticket) => ticket.id);
 }
