@@ -27,7 +27,7 @@ export default function deliveryWorkflow(pi: ExtensionAPI) {
   const Ticket = Type.Union([ImplementationTicket, ReviewTicket]);
   const RunFields = { runId: Text(128), objective: Text(16_000), baseSha: Type.String({ pattern: "^[0-9a-f]{40}([0-9a-f]{24})?$" }), tickets: Type.Array(Ticket, { minItems: 1, maxItems: 64 }), contextPaths: Type.Optional(Type.Array(Text(4096), { maxItems: 32 })), maxConcurrency: Type.Optional(Type.Integer({ minimum: 1, maximum: 8 })), integrationValidation: Type.Optional(IntegrationValidation) };
   const PreviewRun = Type.Object(RunFields, { additionalProperties: false });
-  register("delivery_start", "Run approved visible Herdr ticket graph in this Pi process.", Type.Object({ ...RunFields, worktreeRoot: Text(4096) }, { additionalProperties: false }), core.start);
+  register("delivery_start", "Run approved visible Herdr ticket graph in this Pi process.", Type.Object({ ...RunFields, worktreeRoot: Type.Optional(Text(4096)) }, { additionalProperties: false }), core.start);
   register("delivery_preview", "Validate and render a read-only deterministic ticket graph preview.", PreviewRun, async (_cwd, input) => { const run = validateRunInput(input); const details = previewTicketGraph(run); return { content: [{ type: "text", text: renderTicketGraphMarkdown(run) }], details }; });
   register("delivery_status", "Read persisted inspection status.", Run, core.status);
   register("delivery_reconcile", "Compare persisted, Herdr, evidence, and Git state without mutation.", Run, core.reconcile);

@@ -32,7 +32,9 @@ Restart Pi or run `/reload` only when no delivery run is active or awaiting inte
 /delivery Add refresh-token rotation
 ```
 
-After plan/ticket approval, use `delivery_preview`, then call `delivery_start` with `runId`, objective, exact `baseSha`, external absolute `worktreeRoot`, approved context paths, concurrency `1..8`, optional integration validation, and tickets from [ticket contract](docs/ticket-contract.md).
+After plan/ticket approval, use `delivery_preview`, then call `delivery_start` with `runId`, objective, exact `baseSha`, approved context paths, concurrency `1..8`, optional integration validation, and tickets from [ticket contract](docs/ticket-contract.md). `worktreeRoot` is optional: omission selects a private persistent repository-specific root under `~/.pi/delivery-worktrees/v1`; an explicit normalized absolute existing writable real directory outside the repository remains supported. No temporary fallback exists.
+
+New runs persist canonical resolved root and `derived` or `override` provenance before launch; later runtime operations reuse that evidence rather than rederive it. `.scratch/` stores evidence only, never worktrees.
 
 Runtime uses an event-driven pool: ready tickets fill free slots; each settlement is persisted; first non-success stops new launch while already-active tickets drain. Tickets needing integrated code pause at `awaiting_integration`.
 
