@@ -61,6 +61,7 @@ test("root swap during create blocks and retains returned workspace", async () =
         fs.renameSync(f.worktreeRoot, original); fs.mkdirSync(f.worktreeRoot, { mode: 0o700 });
         return { path: worktreePath, pane: "w1:p1", workspace: "w1" };
       },
+      async workspaceList() { return { workspaces: [{ workspace_id: "w1", worktree: { checkout_path: path.join(f.worktreeRoot, "safe-run-T1") } }] }; },
       async worktreeRemove() { removed = true; },
     }) }).start(f.root, input(f)));
     assert.equal(removed, false); assert.match(output.details.tickets.T1.reason, /identity changed during creation; inspect and retain/);
@@ -86,6 +87,7 @@ test("post-create verification blocks returned-path contradiction without remova
   try {
     const output = await withHerdr(() => createDeliveryWorkflowCore({ herdr: herdr({
       async worktreeCreate({ path: worktreePath }) { execFileSync("git", ["worktree", "add", "--detach", worktreePath, f.baseSha], { cwd: f.root }); return { path: other, pane: "w1:p1", workspace: "w1" }; },
+      async workspaceList() { return { workspaces: [{ workspace_id: "w1", worktree: { checkout_path: path.join(f.worktreeRoot, "safe-run-T1") } }] }; },
       async worktreeRemove() { assert.fail("contradictory resource must be retained"); },
     }) }).start(f.root, input(f)));
     assert.match(output.details.tickets.T1.reason, /contradictory worktree path; inspect and retain/);
@@ -93,12 +95,38 @@ test("post-create verification blocks returned-path contradiction without remova
   } finally { fs.rmSync(other, { recursive: true, force: true }); cleanup(f); }
 });
 
-test("continue validates persisted root and candidate worktree paths before mutating state", async () => {
-  for (const invalid of ["root", "candidate"]) {
+test("post-create workspace proof must be unique, well-formed, matching, and canonical before agent start", async () => {
+  for (const contradiction of ["missing", "duplicate", "malformed", "mismatch", "noncanonical"]) {
+    const f = fixture(); let agentStarted = false; const expected = path.join(f.worktreeRoot, "safe-run-T1"); const other = fs.mkdtempSync(path.join(os.tmpdir(), "delivery-launch-live-other-")); const alias = `${expected}-alias`;
+    try {
+      const output = await withHerdr(() => createDeliveryWorkflowCore({ herdr: herdr({
+        async worktreeCreate({ path: worktreePath }) {
+          execFileSync("git", ["worktree", "add", "--detach", worktreePath, f.baseSha], { cwd: f.root });
+          return { path: worktreePath, pane: "w1:p1", workspace: contradiction === "malformed" ? " w1" : "w1" };
+        },
+        async workspaceList() {
+          if (contradiction === "missing") return { workspaces: [] };
+          if (contradiction === "duplicate") return { workspaces: [{ workspace_id: "w1", worktree: { checkout_path: expected } }, { workspace_id: "w1", worktree: { checkout_path: expected } }] };
+          if (contradiction === "malformed") return { workspaces: [{ workspace_id: " w1", worktree: { checkout_path: expected } }] };
+          if (contradiction === "mismatch") return { workspaces: [{ workspace_id: "w1", worktree: { checkout_path: other } }] };
+          fs.symlinkSync(expected, alias); return { workspaces: [{ workspace_id: "w1", worktree: { checkout_path: alias } }] };
+        },
+        async agentStart() { agentStarted = true; assert.fail("workspace contradiction must block before agent start"); },
+        async worktreeRemove() { assert.fail("created contradictory resource must be retained"); },
+      }) }).start(f.root, input(f)));
+      assert.equal(agentStarted, false); assert.equal(output.details.tickets.T1.workspace, contradiction === "malformed" ? " w1" : "w1");
+      assert.match(output.details.tickets.T1.reason, contradiction === "mismatch" || contradiction === "noncanonical" ? /contradicts created worktree/ : contradiction === "malformed" ? /unexpected worktree, pane, or workspace/ : /exactly one well-formed matching workspace/);
+    } finally { fs.rmSync(alias, { force: true }); fs.rmSync(other, { recursive: true, force: true }); cleanup(f); }
+  }
+});
+
+test("continue validates persisted root and every recorded worktree path before mutating state", async () => {
+  for (const invalid of ["root", "candidate", "pending"]) {
     const f = fixture(); const directory = path.join(f.root, ".scratch", "delivery", "safe-run"); fs.mkdirSync(directory, { recursive: true });
     const run = { version: 2, ...input(f) }; const candidate = { status: "validation_passed", worktreePath: invalid === "candidate" ? f.root : path.join(f.worktreeRoot, "safe-run-T1") };
+    const tickets = { T1: candidate, ...(invalid === "pending" ? { T2: { status: "pending", worktreePath: f.root } } : {}) };
     fs.writeFileSync(path.join(directory, "run.json"), `${JSON.stringify(run, null, 2)}\n`);
-    fs.writeFileSync(path.join(directory, "status.json"), `${JSON.stringify({ version: 2, runId: "safe-run", baseSha: f.baseSha, phase: "awaiting_integration", tickets: { T1: candidate } }, null, 2)}\n`);
+    fs.writeFileSync(path.join(directory, "status.json"), `${JSON.stringify({ version: 2, runId: "safe-run", baseSha: f.baseSha, phase: "awaiting_integration", tickets }, null, 2)}\n`);
     fs.writeFileSync(path.join(f.root, "integrated.txt"), "integrated\n"); execFileSync("git", ["add", "."], { cwd: f.root }); execFileSync("git", ["commit", "-qm", "integrated"], { cwd: f.root }); const integratedSha = git(f.root, "rev-parse", "HEAD");
     if (invalid === "root") fs.rmSync(f.worktreeRoot, { recursive: true, force: true });
     const beforeRun = fs.readFileSync(path.join(directory, "run.json")); const beforeStatus = fs.readFileSync(path.join(directory, "status.json"));
@@ -154,12 +182,17 @@ test("approve disposition with zero pending tickets validates root and review pa
   }
 });
 
-test("reconcile accepts legacy persisted root and blocks recorded path outside it", async () => {
-  const f = fixture(); const directory = path.join(f.root, ".scratch", "delivery", "legacy-run"); fs.mkdirSync(directory, { recursive: true });
-  fs.writeFileSync(path.join(directory, "run.json"), JSON.stringify({ version: 2, runId: "legacy-run", baseSha: f.baseSha, worktreeRoot: f.worktreeRoot, tickets: [] }));
-  fs.writeFileSync(path.join(directory, "status.json"), JSON.stringify({ version: 2, runId: "legacy-run", baseSha: f.baseSha, phase: "blocked", tickets: { T1: { status: "blocked", workspace: "w1", worktreePath: f.root } } }));
-  try {
-    const output = await createDeliveryWorkflowCore({ herdr: herdr({ async workspaceList() { return { workspaces: [] }; } }) }).reconcile(f.root, { runId: "legacy-run" });
-    assert.equal(output.isError, true); assert.deepEqual(output.details.safeActions, ["inspect_and_retain"]); assert.match(output.content[0].text, /not an exact child/);
-  } finally { cleanup(f); }
+test("reconcile blocks recorded paths outside root or unequal to exact expected child without persistence mutation", async () => {
+  for (const invalid of ["outside", "wrong-child"]) {
+    const f = fixture(); const directory = path.join(f.root, ".scratch", "delivery", "legacy-run"); fs.mkdirSync(directory, { recursive: true });
+    const recordedPath = invalid === "outside" ? f.root : path.join(f.worktreeRoot, "legacy-run-other");
+    fs.writeFileSync(path.join(directory, "run.json"), JSON.stringify({ version: 2, runId: "legacy-run", baseSha: f.baseSha, worktreeRoot: f.worktreeRoot, tickets: [] }));
+    fs.writeFileSync(path.join(directory, "status.json"), JSON.stringify({ version: 2, runId: "legacy-run", baseSha: f.baseSha, phase: "blocked", tickets: { T1: { status: "blocked", workspace: "w1", worktreePath: recordedPath } } }));
+    const beforeRun = fs.readFileSync(path.join(directory, "run.json")); const beforeStatus = fs.readFileSync(path.join(directory, "status.json"));
+    try {
+      const output = await createDeliveryWorkflowCore({ herdr: herdr({ async workspaceList() { return { workspaces: [] }; } }) }).reconcile(f.root, { runId: "legacy-run" });
+      assert.equal(output.isError, true); assert.deepEqual(output.details.safeActions, ["inspect_and_retain"]); assert.match(output.content[0].text, invalid === "outside" ? /not an exact child/ : /does not match exact ticket evidence/);
+      assert.deepEqual(fs.readFileSync(path.join(directory, "run.json")), beforeRun); assert.deepEqual(fs.readFileSync(path.join(directory, "status.json")), beforeStatus);
+    } finally { cleanup(f); }
+  }
 });

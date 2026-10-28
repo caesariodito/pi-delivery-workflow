@@ -19,6 +19,7 @@ function fakeHerdr(f, { repair = true, initialStatus = "done", promptStatus = "d
   return { prompts, waits,
     async status() {}, async integrationStatus() { return [{ name: "pi", status: "current (v1)" }]; },
     async worktreeCreate({ path: created }) { worktree = created; execFileSync("git", ["worktree", "add", "--detach", created, f.sha], { cwd: f.root, stdio: "ignore" }); return { path: created, pane: "p1", workspace: "w1" }; },
+    async workspaceList() { return { workspaces: [{ workspace_id: "w1", worktree: { checkout_path: worktree } }] }; },
     async agentStart({ agentArgs }) { assert.equal(agentArgs[agentArgs.indexOf("--model") + 1], "model"); bindingDir = agentArgs[agentArgs.indexOf("--delivery-result-binding-dir") + 1]; fs.writeFileSync(path.join(worktree, "a.txt"), "bad\n"); if (initialExtraFile) fs.writeFileSync(path.join(worktree, initialExtraFile), "outside\n"); writeResult(agentArgs[agentArgs.indexOf("--delivery-result-path") + 1], initialStatus); },
     async agentGet() { const status = repairStarted ? liveAfterPrompt[Math.min(liveIndex++, liveAfterPrompt.length - 1)] : "done"; return { agent: { agent_status: status } }; },
     async agentWait({ timeout }) { waits.push(timeout); return { agent: { agent_status: "done" } }; },

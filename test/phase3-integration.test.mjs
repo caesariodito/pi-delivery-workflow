@@ -19,10 +19,11 @@ function input(fixture, args) {
 }
 
 async function scenario(args, mutateRun) {
-  const fixture = repository(); const launches = [];
+  const fixture = repository(); const launches = []; const workspaces = new Map();
   const herdr = {
     async status() {}, async integrationStatus() { return [{ name: "pi", status: "current (v1)" }]; },
-    async worktreeCreate({ path: worktreePath, base }) { execFileSync("git", ["worktree", "add", "--detach", worktreePath, base], { cwd: fixture.root }); return { path: worktreePath, pane: `pane-${path.basename(worktreePath)}`, workspace: `workspace-${path.basename(worktreePath)}` }; },
+    async worktreeCreate({ path: worktreePath, base }) { execFileSync("git", ["worktree", "add", "--detach", worktreePath, base], { cwd: fixture.root }); const workspace = `workspace-${path.basename(worktreePath)}`; workspaces.set(workspace, worktreePath); return { path: worktreePath, pane: `pane-${path.basename(worktreePath)}`, workspace }; },
+    async workspaceList() { return { workspaces: [...workspaces].map(([workspace_id, checkout_path]) => ({ workspace_id, worktree: { checkout_path } })) }; },
     async agentStart({ agentArgs }) { const resultPath = agentArgs[agentArgs.indexOf("--delivery-result-path") + 1]; const ticketId = path.basename(resultPath, ".json"); launches.push(ticketId); const worktreePath = path.join(fixture.worktreeRoot, `integration-run-${ticketId}`); fs.writeFileSync(path.join(worktreePath, ticketId === "T1" ? "a.txt" : "b.txt"), `${ticketId}\n`); fs.mkdirSync(path.dirname(resultPath), { recursive: true }); fs.writeFileSync(resultPath, JSON.stringify({ version: 1, ticketId, status: "done", summary: "done", changedPaths: [ticketId === "T1" ? "a.txt" : "b.txt"], validation: "passed", handoff: ticketId, question: null })); },
     async agentGet() { return { agent: { agent_status: "done" } }; },
   };

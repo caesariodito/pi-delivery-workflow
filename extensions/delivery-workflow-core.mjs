@@ -176,7 +176,10 @@ async function reconcileObservations(root, directory, state, herdr, worktreeRoot
   const liveTickets = {}; const evidenceTickets = {}; const gitTickets = {};
   for (const [ticketId, ticket] of Object.entries(state.tickets ?? {}).sort(([a], [b]) => a.localeCompare(b))) {
     const workspace = workspaces.get(ticket.workspace); const recordedPath = ticket.worktreePath;
-    if (recordedPath && worktreeRoot) verifyRecordedWorktree(worktreeRoot, recordedPath);
+    if (recordedPath && worktreeRoot) {
+      verifyRecordedWorktree(worktreeRoot, recordedPath);
+      if (recordedPath !== expectedWorktreePath(worktreeRoot, state.runId, ticketId)) throw new Error("recorded worktree path does not match exact ticket evidence.");
+    }
     const livePath = workspace?.worktree?.checkout_path;
     liveTickets[ticketId] = { agentStatus: workspace?.agent_status ?? "unknown", workspacePresent: Boolean(workspace), worktreePresent: Boolean(livePath && fs.existsSync(livePath)), identityMatches: workspace ? Boolean(recordedPath && livePath && path.resolve(livePath) === path.resolve(recordedPath)) : undefined };
     let validationPassed = ticket.validation?.passed === true && Boolean(ticket.patchEvidence);
@@ -221,19 +224,19 @@ export function createDeliveryWorkflowCore({ herdr = createHerdrAdapter({ env: b
     try { fs.lstatSync(worktreePath); throw new Error("ticket worktree path already exists; inspect and retain it without replay."); } catch (error) { if (error?.code !== "ENOENT") throw error; }
     created = await herdr.worktreeCreate({ cwd: repositoryPath, branch, base: run.baseSha, path: worktreePath, label: `${run.runId} ${ticket.id}`, focus: false });
     if (created && typeof created === "object") { state.tickets[ticket.id] = { ...state.tickets[ticket.id], ...(typeof created.pane === "string" ? { pane: created.pane } : {}), ...(typeof created.workspace === "string" ? { workspace: created.workspace } : {}), returnedWorktreePath: created.path }; save(directory, state); }
+    const live = await herdr.workspaceList();
+    if (!Array.isArray(live?.workspaces)) throw new Error("live workspace identity is malformed; inspect and retain resources.");
+    if (typeof created?.path !== "string" || typeof created.pane !== "string" || typeof created.workspace !== "string" || !created.workspace || created.workspace.trim() !== created.workspace) throw new Error("Herdr returned unexpected worktree, pane, or workspace; inspect and retain resources.");
+    const matches = live.workspaces.filter((item) => item?.workspace_id === created.workspace);
+    if (matches.length !== 1 || typeof matches[0].workspace_id !== "string" || !matches[0].workspace_id || matches[0].workspace_id.trim() !== matches[0].workspace_id) throw new Error("live workspace identity must contain exactly one well-formed matching workspace; inspect and retain resources.");
     const rootAfterCreate = persistedWorktreeRoot(repositoryPath, { worktreeRoot, worktreeRootProvenance: run.worktreeRootProvenance });
     if (rootAfterCreate.worktreeRoot !== rootCheck.worktreeRoot || rootAfterCreate.identity !== rootCheck.identity) throw new Error("persisted worktreeRoot identity changed during creation; inspect and retain resources.");
-    if (typeof created?.path !== "string" || typeof created.pane !== "string" || typeof created.workspace !== "string") throw new Error("Herdr returned unexpected worktree, pane, or workspace; inspect and retain resources.");
-    const expectedReal = fs.realpathSync(worktreePath); const returnedReal = fs.realpathSync(created.path);
+    const expectedReal = fs.realpathSync(worktreePath); const livePath = matches[0].worktree?.checkout_path;
+    if (typeof livePath !== "string" || livePath !== expectedReal || fs.realpathSync(livePath) !== expectedReal) throw new Error("live workspace identity contradicts created worktree; inspect and retain resources.");
+    const returnedReal = fs.realpathSync(created.path);
     if (expectedReal !== returnedReal || !inside(rootCheck.worktreeRoot, expectedReal)) throw new Error("Herdr returned a contradictory worktree path; inspect and retain resources.");
     const top = fs.realpathSync((await git(expectedReal, ["rev-parse", "--show-toplevel"])).trim()); const head = (await git(expectedReal, ["rev-parse", "HEAD"])).trim();
     if (top !== expectedReal || head !== run.baseSha) throw new Error("created worktree Git identity or base SHA is contradictory; inspect and retain resources.");
-    if (typeof herdr.workspaceList === "function") {
-      const live = await herdr.workspaceList();
-      if (!Array.isArray(live?.workspaces)) throw new Error("live workspace identity is malformed; inspect and retain resources.");
-      const workspace = live.workspaces.find((item) => item.workspace_id === created.workspace);
-      if (workspace) { const livePath = workspace.worktree?.checkout_path; if (typeof livePath !== "string" || fs.realpathSync(livePath) !== expectedReal) throw new Error("live workspace identity contradicts created worktree; inspect and retain resources."); }
-    }
     let reviewBefore = null;
     if (ticket.mode === "review") {
       try { reviewBefore = { parent: await parentSnapshot(repositoryPath), worktree: await inspectWorkerTree(worktreePath, run.baseSha, ticket) }; }
@@ -387,8 +390,8 @@ export function createDeliveryWorkflowCore({ herdr = createHerdrAdapter({ env: b
     },
     async steer(repositoryPath, input) { const directory = runDir(repositoryPath, input.runId); const running = active.get(directory); if (!running) return result("Run is not active in this Pi process; inspect Herdr and start a new supervised run if needed.", { status: "not_active" }, true); const ticket = running.state.tickets[safeId(input.ticketId, "ticketId")]; if (ticket?.status !== "running" || !ticket.target) return result("Ticket has no active target.", { status: "not_active" }, true); const liveState = parseAgentState(await herdr.agentGet(ticket.target)); if (liveState !== "working") return result(`Ticket agent is ${liveState}; guidance not sent.`, { status: "not_active", agentState: liveState }, true); await herdr.agentPrompt({ target: ticket.target, prompt: input.message, wait: false, timeout: 30_000 }); return result("Guidance sent; delivery is not proof of compliance.", { status: "sent", target: ticket.target }); },
     async stop(repositoryPath, input) { const directory = runDir(repositoryPath, input.runId); const running = active.get(directory); const state = fs.existsSync(statePath(directory)) ? readJson(statePath(directory)) : null; const targets = input.ticketId ? [state?.tickets?.[input.ticketId]].filter((ticket) => ticket?.status === "running") : Object.values(state?.tickets ?? {}).filter((ticket) => ticket.status === "running"); if (!targets.length) return result("No active recorded ticket target.", { status: "not_active" }, true); for (const ticket of targets) if (ticket.target) await herdr.agentSendKeys({ target: ticket.target, keys: ["ctrl+c"] }); if (running) { running.state.stopRequested = true; running.state.nextAction = "Wait for active tickets to settle; no new tickets will launch."; save(directory, running.state); } return result("Stop requested. No new ticket will launch; pane/worktree retained.", { status: "stop_requested", targets: targets.map((ticket) => ticket.target) }); },
-    async continue(repositoryPath, input) { const directory = runDir(repositoryPath, input.runId); if (active.has(directory)) return result("Run is already active.", { status: "active" }, true); const savedRun = readJson(path.join(directory, "run.json")); const state = readJson(statePath(directory)); if (savedRun.version !== 2 || state.version !== 2) return result("Legacy run lacks immutable patch evidence and cannot continue.", { status: "blocked" }, true); if (state.phase !== "awaiting_integration") return result("Run is not awaiting integration.", { status: state.phase }, true); const root = fs.realpathSync(repositoryPath); const candidates = Object.entries(state.tickets).filter(([, ticket]) => ticket.status === "validation_passed");
-      try { verifyRecordedTicketWorktrees(root, savedRun, candidates); } catch (error) { return result(error instanceof Error ? error.message : String(error), { status: "blocked", safeActions: ["inspect_and_retain"] }, true); }
+    async continue(repositoryPath, input) { const directory = runDir(repositoryPath, input.runId); if (active.has(directory)) return result("Run is already active.", { status: "active" }, true); const savedRun = readJson(path.join(directory, "run.json")); const state = readJson(statePath(directory)); if (savedRun.version !== 2 || state.version !== 2) return result("Legacy run lacks immutable patch evidence and cannot continue.", { status: "blocked" }, true); if (state.phase !== "awaiting_integration") return result("Run is not awaiting integration.", { status: state.phase }, true); const root = fs.realpathSync(repositoryPath); const entries = Object.entries(state.tickets); const candidates = entries.filter(([, ticket]) => ticket.status === "validation_passed");
+      try { verifyRecordedTicketWorktrees(root, savedRun, entries); } catch (error) { return result(error instanceof Error ? error.message : String(error), { status: "blocked", safeActions: ["inspect_and_retain"] }, true); }
       if (input.integratedSha === state.baseSha || (await git(root, ["rev-parse", "HEAD"])).trim() !== input.integratedSha || (await git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])).length) return result("Integrated SHA must be a new clean current parent HEAD.", { status: "blocked" }, true); try { await git(root, ["merge-base", "--is-ancestor", state.baseSha, input.integratedSha]); } catch { return result("Integrated SHA must descend from prior base SHA.", { status: "blocked" }, true); }
       const verified = [];
       try { for (const [ticketId, ticket] of candidates) verified.push([ticketId, await verifyIntegratedPatch(root, directory, ticketId, ticket)]); } catch (error) { return result(error instanceof Error ? error.message : String(error), { status: "blocked" }, true); }
