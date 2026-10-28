@@ -37,6 +37,23 @@ test("normalizes bounded execution controls", () => {
   assert.equal(configured.validationTimeoutSeconds, 1800);
 });
 
+test("normalizes optional integration validation without rewriting tickets", () => {
+  const value = input();
+  value.integrationValidation = { executable: "npm", args: ["run", "check"], cwd: ".", timeoutSeconds: 1800 };
+  const originalTickets = structuredClone(value.tickets);
+  const run = validateRunInput(value);
+  assert.deepEqual(run.integrationValidation, { executable: "npm", args: ["run", "check"], cwd: ".", timeoutSeconds: 1800 });
+  assert.deepEqual(value.tickets, originalTickets);
+  assert.equal(run.tickets[0].integrationValidation, undefined);
+
+  for (const timeoutSeconds of [undefined, 29, 1801, 30.5]) {
+    const invalid = input(); invalid.integrationValidation = { executable: "node", args: [], timeoutSeconds };
+    assert.throws(() => validateRunInput(invalid), /integrationValidation\.timeoutSeconds/);
+  }
+  const shell = input(); shell.integrationValidation = { executable: "node", args: [], timeoutSeconds: 30, shell: true };
+  assert.throws(() => validateRunInput(shell), /unknown properties/);
+});
+
 test("parses porcelain v1 NUL renames with source and destination", () => {
   assert.deepEqual(parsePorcelainV1Z(`R  new.js\0old.js\0?? untracked.js\0`), ["new.js", "old.js", "untracked.js"]);
   assert.throws(() => parsePorcelainV1Z("R  new.js\0"), /source/);

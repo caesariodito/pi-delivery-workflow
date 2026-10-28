@@ -25,12 +25,28 @@ function boundedInteger(value, label, minimum, maximum, defaultValue) {
   if (!Number.isSafeInteger(normalized) || normalized < minimum || normalized > maximum) throw new TypeError(`${label} must be an integer from ${minimum} to ${maximum}.`);
   return normalized;
 }
+function stringArray(value, label) {
+  if (!Array.isArray(value) || value.length > 32) throw new TypeError(`${label} must contain 0-32 strings.`);
+  return Object.freeze(value.map((item, index) => text(item, `${label}[${index}]`, 4000)));
+}
 function command(value, label) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new TypeError(`${label} must be an object.`);
   const keys = Object.keys(value); if (keys.some((key) => !["executable", "args", "cwd"].includes(key))) throw new TypeError(`${label} has unknown properties.`);
   const executable = text(value.executable, `${label}.executable`, 1024);
   if (!Array.isArray(value.args) || value.args.length > 256 || value.args.some((arg) => typeof arg !== "string" || arg.length > 8192 || arg.includes("\0"))) throw new TypeError(`${label}.args is invalid.`);
   return Object.freeze({ executable, args: Object.freeze([...value.args]), ...(value.cwd ? { cwd: validationCwd(value.cwd, `${label}.cwd`) } : {}) });
+}
+function integrationValidation(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new TypeError("integrationValidation must be an object.");
+  const keys = Object.keys(value); if (keys.some((key) => !["executable", "args", "cwd", "timeoutSeconds"].includes(key))) throw new TypeError("integrationValidation has unknown properties.");
+  const normalized = command({ executable: value.executable, args: value.args, ...(value.cwd !== undefined ? { cwd: value.cwd } : {}) }, "integrationValidation");
+  return Object.freeze({ ...normalized, timeoutSeconds: boundedInteger(value.timeoutSeconds, "integrationValidation.timeoutSeconds", 30, 1800) });
+}
+function ticketContext(value, label) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new TypeError(`${label} must be an object.`);
+  const fields = ["observableBehavior", "acceptanceExamples", "nonGoals", "entryPoints", "invariants", "expectedValidation", "unresolvedDecisions"];
+  if (Object.keys(value).some((key) => !fields.includes(key))) throw new TypeError(`${label} has unknown properties.`);
+  return Object.freeze(Object.fromEntries(fields.filter((field) => value[field] !== undefined).map((field) => [field, stringArray(value[field], `${label}.${field}`)])));
 }
 function overlaps(left, right) {
   const a = left.endsWith("/") ? left : `${left}/`; const b = right.endsWith("/") ? right : `${right}/`;
@@ -42,7 +58,7 @@ export function validateTicketGraph(value) {
   const seen = new Set();
   const tickets = value.map((raw, index) => {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new TypeError(`tickets[${index}] must be an object.`);
-    const allowed = new Set(["id", "goal", "definitionOfDone", "dependencies", "ownedPaths", "forbiddenScope", "worker", "validation", "requiresIntegratedBase", "specPaths", "maxFixRounds", "timeoutSeconds", "validationTimeoutSeconds"]);
+    const allowed = new Set(["id", "goal", "definitionOfDone", "dependencies", "ownedPaths", "forbiddenScope", "worker", "validation", "requiresIntegratedBase", "specPaths", "maxFixRounds", "timeoutSeconds", "validationTimeoutSeconds", "context"]);
     if (Object.keys(raw).some((key) => !allowed.has(key))) throw new TypeError(`${raw.id ?? `tickets[${index}]`} has unknown properties.`);
     const ticketId = id(raw.id, `tickets[${index}].id`); if (seen.has(ticketId)) throw new TypeError(`duplicate ticket ${ticketId}.`); seen.add(ticketId);
     if (!Array.isArray(raw.dependencies) || raw.dependencies.length > 32) throw new TypeError(`${ticketId}.dependencies is invalid.`);
@@ -64,6 +80,7 @@ export function validateTicketGraph(value) {
       maxFixRounds: boundedInteger(raw.maxFixRounds, `${ticketId}.maxFixRounds`, 0, 1, 0),
       timeoutSeconds: boundedInteger(raw.timeoutSeconds, `${ticketId}.timeoutSeconds`, 60, 7200, 300),
       validationTimeoutSeconds: boundedInteger(raw.validationTimeoutSeconds, `${ticketId}.validationTimeoutSeconds`, 30, 1800, 300),
+      ...(raw.context === undefined ? {} : { context: ticketContext(raw.context, `${ticketId}.context`) }),
     };
     return Object.freeze(normalized);
   });
@@ -82,7 +99,7 @@ export function validateRunInput(value) {
   if (!SHA.test(value.baseSha ?? "")) throw new TypeError("baseSha is invalid.");
   if (typeof value.objective !== "string" || value.objective.length === 0 || value.objective.length > 16_000) throw new TypeError("objective is invalid.");
   if (!Number.isSafeInteger(value.maxConcurrency ?? 4) || (value.maxConcurrency ?? 4) < 1 || (value.maxConcurrency ?? 4) > 8) throw new TypeError("maxConcurrency is invalid.");
-  return Object.freeze({ runId: value.runId, objective: value.objective, baseSha: value.baseSha, tickets: validateTicketGraph(value.tickets), maxConcurrency: value.maxConcurrency ?? 4, contextPaths: Object.freeze((value.contextPaths ?? []).map((item) => relative(item, "contextPath"))) });
+  return Object.freeze({ runId: value.runId, objective: value.objective, baseSha: value.baseSha, tickets: validateTicketGraph(value.tickets), maxConcurrency: value.maxConcurrency ?? 4, contextPaths: Object.freeze((value.contextPaths ?? []).map((item) => relative(item, "contextPath"))), ...(value.integrationValidation === undefined ? {} : { integrationValidation: integrationValidation(value.integrationValidation) }) });
 }
 
 function validated(state) { return ["validation_passed", "integrated", "cleaned"].includes(state?.status); }
@@ -118,17 +135,21 @@ export function validateTicketResult(value, ticketId) {
 }
 
 export function buildContextPacket({ run, ticket, repositoryPath, worktreePath, promptPath, resultPath, nonce, dependencyHandoffs = [], guidance = "" }) {
+  const contextSections = { observableBehavior: "Observable behavior", acceptanceExamples: "Acceptance examples", nonGoals: "Non-goals", entryPoints: "Entry points", invariants: "Invariants", expectedValidation: "Expected validation", unresolvedDecisions: "Unresolved decisions" };
+  const richContext = Object.entries(contextSections).flatMap(([field, heading]) => ticket.context?.[field]?.length ? ["", `## ${heading}`, ...ticket.context[field].map((item) => `- ${item}`)] : []);
   const lines = [
     `# Delivery ticket ${ticket.id}`,
     "", "## Run objective", run.objective,
     "", "## Goal", ticket.goal,
     "", "## Definition of done", ticket.definitionOfDone,
+    ...richContext,
     "", "## Paths", `- Repository: \`${repositoryPath}\``, `- Assigned worktree: \`${worktreePath}\``, `- Context packet: \`${promptPath}\``, `- Result file: \`${resultPath}\``, `- Immutable base: \`${run.baseSha}\``,
     "", "## Ownership", ...ticket.ownedPaths.map((item) => `- \`${item}\``), `- Forbidden: ${ticket.forbiddenScope}`,
     "", "## Dependencies", ...(ticket.dependencies.length ? ticket.dependencies.map((item) => `- ${item}`) : ["- None"]),
     "", "## Dependency handoffs", ...(dependencyHandoffs.length ? dependencyHandoffs.map((item) => `- **${item.ticketId}:** ${item.handoff}`) : ["- None"]),
     "", "## Source documents", ...[...run.contextPaths, ...ticket.specPaths].map((item) => `- \`${item}\``),
     "", "## Validation", `- Executable: \`${ticket.validation.executable}\``, `- Args: ${JSON.stringify(ticket.validation.args)}`, `- Cwd: \`${ticket.validation.cwd ?? "."}\``,
+    ...(run.integrationValidation ? ["", "## Integration validation", `- Executable: \`${run.integrationValidation.executable}\``, `- Args: ${JSON.stringify(run.integrationValidation.args)}`, `- Cwd: \`${run.integrationValidation.cwd ?? "."}\``, `- Timeout seconds: ${run.integrationValidation.timeoutSeconds}`] : []),
     "", "## Agent contract", `- Model: \`${ticket.worker.model}\``, `- Thinking: \`${ticket.worker.thinking}\``, `- Tools: ${ticket.worker.tools.map((item) => `\`${item}\``).join(", ")}`,
     "", "## Parent guidance", guidance || "None.",
     "", "## Required result", `Call \`delivery_result_write\` once with nonce \`${nonce}\` and this schema:`, "```json", JSON.stringify({ nonce, ticketId: ticket.id, status: "done | blocked | failed", summary: "bounded summary", changedPaths: ["relative/path"], validation: "passed | failed | not_run", handoff: "short context for dependent agents", question: null }, null, 2), "```",
