@@ -23,9 +23,10 @@ function runInput(sha, worktreeRoot) { return { runId: "run-1", objective: "Test
 
 test("registers thin supervised tool surface", () => {
   const pi = fakePi(); deliveryWorkflow(pi);
-  assert.deepEqual([...pi.tools.keys()].sort(), ["delivery_cleanup", "delivery_continue", "delivery_start", "delivery_status", "delivery_steer", "delivery_stop"]);
+  assert.deepEqual([...pi.tools.keys()].sort(), ["delivery_cleanup", "delivery_continue", "delivery_dispose", "delivery_preview", "delivery_start", "delivery_status", "delivery_steer", "delivery_stop"]);
   assert.deepEqual(pi.tools.get("delivery_cleanup").annotations, { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false });
-  assert.equal(pi.commands.has("delivery"), true); assert.equal(pi.tools.has("delivery_recover"), false); assert.equal(pi.tools.has("delivery_reply"), false); assert.equal(pi.tools.has("delivery_review"), false);
+  assert.deepEqual(pi.tools.get("delivery_preview").annotations, { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false });
+  assert.equal(pi.commands.has("delivery"), true); assert.equal(pi.commands.has("delivery_preview"), true); assert.equal(pi.commands.has("delivery_dispose"), true); assert.equal(pi.tools.has("delivery_recover"), false); assert.equal(pi.tools.has("delivery_reply"), false); assert.equal(pi.tools.has("delivery_review"), false);
 });
 
 test("delivery_start TypeBox schema enforces inclusive integer bounds and rejects unknown fields", () => {
@@ -34,6 +35,21 @@ test("delivery_start TypeBox schema enforces inclusive integer bounds and reject
   Object.assign(ticket, { maxFixRounds: 1, timeoutSeconds: 7200, validationTimeoutSeconds: 1800 }); assert.equal(Check(schema, value), true);
   for (const [key, invalid] of [["maxFixRounds", 2], ["timeoutSeconds", 59], ["timeoutSeconds", 60.5], ["validationTimeoutSeconds", 1801]]) { const changed = structuredClone(value); changed.tickets[0][key] = invalid; assert.equal(Check(schema, changed), false, `${key} accepted ${invalid}`); }
   const unknown = structuredClone(value); unknown.tickets[0].unexpected = true; assert.equal(Check(schema, unknown), false);
+});
+
+test("Phase 3 TypeBox surface enforces integration, context, review, preview, and disposition contracts", async () => {
+  const pi = fakePi(); deliveryWorkflow(pi); const fixture = repository(); const startSchema = pi.tools.get("delivery_start").parameters; const previewSchema = pi.tools.get("delivery_preview").parameters;
+  const implementation = runInput(fixture.sha, fixture.worktreeRoot); implementation.tickets = [implementation.tickets[0]]; implementation.integrationValidation = { executable: "npm", args: ["run", "check"], cwd: ".", timeoutSeconds: 300 }; implementation.tickets[0].context = { observableBehavior: ["visible"], acceptanceExamples: ["passes"], nonGoals: [], entryPoints: ["src/a.js"], invariants: ["safe"], expectedValidation: ["npm test"], unresolvedDecisions: [] };
+  assert.equal(Check(startSchema, implementation), true);
+  const review = structuredClone(implementation); review.tickets = [{ id: "R1", mode: "review", goal: "Review", definitionOfDone: "Verdict", dependencies: [], ownedPaths: [], readPaths: ["src/"], worker: { name: "reviewer", kind: "reviewer", model: "model", thinking: "medium", tools: ["read"] }, validation: { executable: "npm", args: ["run", "check"] }, maxFixRounds: 0 }];
+  assert.equal(Check(startSchema, review), true); assert.equal(Check(previewSchema, { ...review, worktreeRoot: undefined }), false); const preview = structuredClone(review); delete preview.worktreeRoot; assert.equal(Check(previewSchema, preview), true);
+  for (const changed of [
+    Object.assign(structuredClone(review), { tickets: [{ ...review.tickets[0], ownedPaths: ["src/a.js"] }] }),
+    Object.assign(structuredClone(review), { tickets: [{ ...review.tickets[0], worker: { ...review.tickets[0].worker, tools: ["read", "write"] } }] }),
+    Object.assign(structuredClone(review), { tickets: [{ ...review.tickets[0], maxFixRounds: 1 }] }),
+  ]) assert.equal(Check(startSchema, changed), false);
+  const disposition = pi.tools.get("delivery_dispose").parameters; assert.equal(Check(disposition, { runId: "run", ticketId: "R1", disposition: "approve" }), true); assert.equal(Check(disposition, { runId: "run", ticketId: "R1", disposition: "accepted" }), false); assert.equal(Check(disposition, { runId: "run", disposition: "approve" }), false);
+  const output = await pi.tools.get("delivery_preview").execute("id", preview, undefined, undefined, { cwd: fixture.root }); assert.equal(output.details.runId, review.runId); assert.match(output.content[0].text, /Delivery preview/); assert.equal(fs.existsSync(path.join(fixture.root, ".scratch", "delivery")), false);
 });
 
 test("scoped result tool writes ticket result once with byte-compatible implementation output", async () => {

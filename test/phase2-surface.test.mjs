@@ -12,9 +12,9 @@ test("delivery ticket TypeBox surface exposes bounded Phase 2 controls", () => {
   ]) assert.ok(source.includes(contract), `missing TypeBox contract: ${contract}`);
 });
 
-test("delivery tool list remains unchanged", () => {
+test("delivery tool list includes approved Phase 3 additions", () => {
   assert.deepEqual(
     [...source.matchAll(/register\("(delivery_[a-z]+)"/g)].map((match) => match[1]),
-    ["delivery_start", "delivery_status", "delivery_steer", "delivery_continue", "delivery_cleanup", "delivery_stop"],
+    ["delivery_start", "delivery_preview", "delivery_status", "delivery_steer", "delivery_continue", "delivery_dispose", "delivery_cleanup", "delivery_stop"],
   );
 });
