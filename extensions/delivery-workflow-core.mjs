@@ -16,6 +16,7 @@ const active = new Map();
 
 function result(text, details, isError = false) { return { content: [{ type: "text", text }], details, ...(isError ? { isError: true } : {}) }; }
 function safeId(value, label) { if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value)) throw new TypeError(`${label} is invalid.`); return value; }
+function herdrIdentifier(value) { return typeof value === "string" && value.length > 0 && !value.includes("\0") && !value.startsWith("-") && value.trim() === value; }
 function inside(root, child) { const relative = path.relative(root, child); return relative !== "" && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative); }
 function atomicJson(file, value) { fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 }); const temporary = `${file}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`; fs.writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 }); fs.renameSync(temporary, file); }
 function exclusiveJson(file, value) { fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 }); fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600, flag: "wx" }); }
@@ -169,7 +170,7 @@ async function parentSnapshot(root) {
   return { head, clean: status.length === 0, statusSha256: digest(status), statusBytes: Buffer.byteLength(status) };
 }
 
-async function reconcileObservations(root, directory, state, herdr, worktreeRoot) {
+async function reconcileObservations(root, directory, state, herdr, worktreeRoot, runId) {
   const response = await herdr.workspaceList();
   if (!Array.isArray(response?.workspaces)) throw new Error("Herdr workspace state is malformed.");
   const workspaces = new Map(response.workspaces.map((workspace) => [workspace.workspace_id, workspace]));
@@ -178,7 +179,7 @@ async function reconcileObservations(root, directory, state, herdr, worktreeRoot
     const workspace = workspaces.get(ticket.workspace); const recordedPath = ticket.worktreePath;
     if (recordedPath && worktreeRoot) {
       verifyRecordedWorktree(worktreeRoot, recordedPath);
-      if (recordedPath !== expectedWorktreePath(worktreeRoot, state.runId, ticketId)) throw new Error("recorded worktree path does not match exact ticket evidence.");
+      if (recordedPath !== expectedWorktreePath(worktreeRoot, runId, ticketId)) throw new Error("recorded worktree path does not match exact ticket evidence.");
     }
     const livePath = workspace?.worktree?.checkout_path;
     liveTickets[ticketId] = { agentStatus: workspace?.agent_status ?? "unknown", workspacePresent: Boolean(workspace), worktreePresent: Boolean(livePath && fs.existsSync(livePath)), identityMatches: workspace ? Boolean(recordedPath && livePath && path.resolve(livePath) === path.resolve(recordedPath)) : undefined };
@@ -226,9 +227,9 @@ export function createDeliveryWorkflowCore({ herdr = createHerdrAdapter({ env: b
     if (created && typeof created === "object") { state.tickets[ticket.id] = { ...state.tickets[ticket.id], ...(typeof created.pane === "string" ? { pane: created.pane } : {}), ...(typeof created.workspace === "string" ? { workspace: created.workspace } : {}), returnedWorktreePath: created.path }; save(directory, state); }
     const live = await herdr.workspaceList();
     if (!Array.isArray(live?.workspaces)) throw new Error("live workspace identity is malformed; inspect and retain resources.");
-    if (typeof created?.path !== "string" || typeof created.pane !== "string" || typeof created.workspace !== "string" || !created.workspace || created.workspace.trim() !== created.workspace) throw new Error("Herdr returned unexpected worktree, pane, or workspace; inspect and retain resources.");
+    if (typeof created?.path !== "string" || !herdrIdentifier(created.pane) || !herdrIdentifier(created.workspace)) throw new Error("Herdr returned unexpected worktree, pane, or workspace; inspect and retain resources.");
     const matches = live.workspaces.filter((item) => item?.workspace_id === created.workspace);
-    if (matches.length !== 1 || typeof matches[0].workspace_id !== "string" || !matches[0].workspace_id || matches[0].workspace_id.trim() !== matches[0].workspace_id) throw new Error("live workspace identity must contain exactly one well-formed matching workspace; inspect and retain resources.");
+    if (matches.length !== 1 || !herdrIdentifier(matches[0].workspace_id)) throw new Error("live workspace identity must contain exactly one well-formed matching workspace; inspect and retain resources.");
     const rootAfterCreate = persistedWorktreeRoot(repositoryPath, { worktreeRoot, worktreeRootProvenance: run.worktreeRootProvenance });
     if (rootAfterCreate.worktreeRoot !== rootCheck.worktreeRoot || rootAfterCreate.identity !== rootCheck.identity) throw new Error("persisted worktreeRoot identity changed during creation; inspect and retain resources.");
     const expectedReal = fs.realpathSync(worktreePath); const livePath = matches[0].worktree?.checkout_path;
@@ -367,8 +368,12 @@ export function createDeliveryWorkflowCore({ herdr = createHerdrAdapter({ env: b
     async status(repositoryPath, input) { const directory = runDir(repositoryPath, input.runId); if (!fs.existsSync(statePath(directory))) return result(`Run ${input.runId} not found.`, { status: "not_found" }, true); const state = readJson(statePath(directory)); let savedRun = null; try { savedRun = readJson(path.join(directory, "run.json")); } catch {} const view = summary(state, savedRun); const reasons = Object.entries(state.tickets ?? {}).filter(([, ticket]) => ticket.reason).map(([ticketId, ticket]) => `${ticketId}: ${ticket.reason}`); return result(`Delivery ${input.runId}: ${state.phase}. pending ${view.lifecycle.pending}; running ${view.lifecycle.running}; validation-passed ${view.lifecycle.validationPassed}; integrated ${view.lifecycle.integrated}; cleaned ${view.lifecycle.cleaned}; blocked ${view.lifecycle.blocked}; failed ${view.lifecycle.failed}; stopped ${view.lifecycle.stopped}; timed-out ${view.lifecycle.timedOut}; reviewed ${view.counts.reviewed}; disposed ${view.counts.disposed}; retained resources ${view.counts.retainedResources}. Review verdicts: approve ${view.reviewVerdicts.approve}; changes_requested ${view.reviewVerdicts.changes_requested}; blocked ${view.reviewVerdicts.blocked}.${reasons.length ? ` ${reasons.join("; ")}.` : ""} Next: ${view.nextAction}`, { ...state, ...view }); },
     async reconcile(repositoryPath, input) {
       const directory = runDir(repositoryPath, input.runId); if (!fs.existsSync(statePath(directory))) return result(`Run ${input.runId} not found.`, { status: "not_found" }, true);
-      const root = fs.realpathSync(repositoryPath); const state = readJson(statePath(directory)); let savedRun = null; try { savedRun = readJson(path.join(directory, "run.json")); } catch {} const before = await parentSnapshot(root);
-      let observations; try { const worktreeRoot = savedRun ? persistedWorktreeRoot(root, savedRun).worktreeRoot : undefined; observations = await reconcileObservations(root, directory, state, herdr, worktreeRoot); } catch (error) { return result(error instanceof Error ? error.message : String(error), { status: "blocked", inferredSuccess: false, safeActions: ["inspect_and_retain"] }, true); }
+      const root = fs.realpathSync(repositoryPath); const state = readJson(statePath(directory)); let savedRun; try { savedRun = readJson(path.join(directory, "run.json")); } catch {} const before = await parentSnapshot(root);
+      let observations; try {
+        if (!savedRun || input.runId !== savedRun.runId || input.runId !== state.runId) throw new Error("Persisted run identity does not match requested run identity; inspect and retain resources.");
+        const worktreeRoot = savedRun.worktreeRoot === undefined ? undefined : persistedWorktreeRoot(root, savedRun).worktreeRoot;
+        observations = await reconcileObservations(root, directory, state, herdr, worktreeRoot, savedRun.runId);
+      } catch (error) { return result(error instanceof Error ? error.message : String(error), { status: "blocked", inferredSuccess: false, safeActions: ["inspect_and_retain"] }, true); }
       const analysis = analyzeReconciliation({ persistedTickets: state.tickets, liveTickets: observations.liveTickets, evidenceTickets: observations.evidenceTickets, gitTickets: observations.gitTickets }); const after = await parentSnapshot(root);
       const parentUnchanged = before.head === after.head && before.statusSha256 === after.statusSha256 && before.statusBytes === after.statusBytes;
       const details = { ...analysis, runId: input.runId, phase: state.phase, observations: { workspaceCount: observations.workspaceCount, parentBefore: before, parentAfter: after, parentUnchanged, gitTickets: observations.gitTickets }, safeActions: [...new Set(analysis.tickets.map((ticket) => ticket.recommendation.action))].sort() };
@@ -404,7 +409,7 @@ export function createDeliveryWorkflowCore({ herdr = createHerdrAdapter({ env: b
       }
       for (const [ticketId, evidence] of verified) state.tickets[ticketId] = { ...state.tickets[ticketId], status: "integrated", integrationEvidence: { ...evidence, integratedSha: input.integratedSha, verifiedAt: new Date().toISOString() } };
       savedRun.baseSha = input.integratedSha; state.baseSha = input.integratedSha; state.phase = "running"; save(directory, state); atomicJson(path.join(directory, "run.json"), savedRun); const next = await run(root, savedRun, true); return result(`Delivery ${input.runId}: ${next.phase}. ${next.nextAction}`, next, next.phase === "blocked"); },
-    async cleanup(repositoryPath, input) { const directory = runDir(repositoryPath, input.runId); if (active.has(directory)) return result("Run is active; cleanup refused.", { status: "blocked", cleaned: [], alreadyCleaned: [], retained: [{ ticketId: "*", reason: "run active" }] }, true); const state = readJson(statePath(directory)); if (state.version !== 2) return result("Legacy run lacks immutable patch evidence; cleanup refused.", { status: "blocked", cleaned: [], alreadyCleaned: [], retained: [{ ticketId: "*", reason: "legacy evidence" }] }, true); const root = fs.realpathSync(repositoryPath); const savedRun = readJson(path.join(directory, "run.json")); let worktreeRoot; try { worktreeRoot = persistedWorktreeRoot(root, savedRun).worktreeRoot; } catch (error) { return result(error instanceof Error ? error.message : String(error), { status: "blocked", cleaned: [], alreadyCleaned: [], retained: [{ ticketId: "*", reason: "worktree root unverifiable" }] }, true); } if ((await git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])).length) return result("Parent checkout must be clean; cleanup refused.", { status: "blocked", cleaned: [], alreadyCleaned: [], retained: [{ ticketId: "*", reason: "dirty parent" }] }, true); await herdr.status(); const live = await herdr.workspaceList(); if (!Array.isArray(live.workspaces)) return result("Herdr workspace state is malformed; cleanup refused.", { status: "blocked", cleaned: [], alreadyCleaned: [], retained: [{ ticketId: "*", reason: "unknown Herdr state" }] }, true); const byId = new Map(live.workspaces.map((workspace) => [workspace.workspace_id, workspace])); const cleaned = []; const alreadyCleaned = []; const retained = [];
+    async cleanup(repositoryPath, input) { const directory = runDir(repositoryPath, input.runId); if (active.has(directory)) return result("Run is active; cleanup refused.", { status: "blocked", cleaned: [], alreadyCleaned: [], retained: [{ ticketId: "*", reason: "run active" }] }, true); const state = readJson(statePath(directory)); if (state.version !== 2) return result("Legacy run lacks immutable patch evidence; cleanup refused.", { status: "blocked", cleaned: [], alreadyCleaned: [], retained: [{ ticketId: "*", reason: "legacy evidence" }] }, true); const root = fs.realpathSync(repositoryPath); const savedRun = readJson(path.join(directory, "run.json")); let worktreeRoot; try { worktreeRoot = persistedWorktreeRoot(root, savedRun).worktreeRoot; } catch (error) { return result(error instanceof Error ? error.message : String(error), { status: "blocked", cleaned: [], alreadyCleaned: [], retained: [{ ticketId: "*", reason: "worktree root unverifiable" }] }, true); } if ((await git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])).length) return result("Parent checkout must be clean; cleanup refused.", { status: "blocked", cleaned: [], alreadyCleaned: [], retained: [{ ticketId: "*", reason: "dirty parent" }] }, true); await herdr.status(); const live = await herdr.workspaceList(); if (!Array.isArray(live.workspaces)) return result("Herdr workspace state is malformed; cleanup refused.", { status: "blocked", cleaned: [], alreadyCleaned: [], retained: [{ ticketId: "*", reason: "unknown Herdr state" }] }, true); const cleaned = []; const alreadyCleaned = []; const retained = [];
       for (const [ticketId, ticket] of Object.entries(state.tickets).sort(([a], [b]) => a.localeCompare(b))) {
         if (ticket.status === "cleaned") { alreadyCleaned.push(ticketId); continue; }
         const reviewCleanup = ticket.status === "disposed";
@@ -412,14 +417,19 @@ export function createDeliveryWorkflowCore({ herdr = createHerdrAdapter({ env: b
         if (reviewCleanup && ticket.disposition !== "approve") { retained.push({ ticketId, reason: `disposition ${ticket.disposition}` }); continue; }
         try {
           verifyRecordedWorktree(worktreeRoot, ticket.worktreePath);
-          if (ticket.worktreePath !== expectedWorktreePath(worktreeRoot, input.runId, ticketId)) throw new Error("recorded worktree path does not match exact ticket evidence");
+          const expectedPath = expectedWorktreePath(worktreeRoot, savedRun.runId, ticketId);
+          if (ticket.worktreePath !== expectedPath) throw new Error("recorded worktree path does not match exact ticket evidence");
           const head = (await git(root, ["rev-parse", "HEAD"])).trim();
           if (reviewCleanup) {
             const reviewBase = ticket.reviewEvidence?.before?.worktree?.head;
             const tree = await inspectWorkerTree(ticket.worktreePath, reviewBase, { ownedPaths: [] });
             if (!reviewBase || tree.head !== reviewBase || tree.changes.length || ticket.reviewEvidence?.parentUnchanged !== true || ticket.reviewEvidence?.worktreeUnchanged !== true) throw new Error("review worktree mutation or unverifiable review evidence");
           } else { await git(root, ["merge-base", "--is-ancestor", ticket.integrationEvidence.integratedSha, head]); await verifyIntegratedPatch(root, directory, ticketId, ticket); }
-          const workspace = byId.get(ticket.workspace); const livePath = workspace?.worktree?.checkout_path; if (!workspace || path.resolve(livePath ?? "") !== path.resolve(ticket.worktreePath) || !["idle", "done"].includes(workspace.agent_status)) throw new Error(!workspace ? "workspace missing or unknown" : `workspace identity or agent state ${workspace.agent_status ?? "unknown"} is unsafe`);
+          if (!herdrIdentifier(ticket.workspace)) throw new Error("recorded workspace identity is malformed");
+          const matches = live.workspaces.filter((workspace) => workspace?.workspace_id === ticket.workspace);
+          if (matches.length !== 1 || !herdrIdentifier(matches[0].workspace_id)) throw new Error("live workspace identity must contain exactly one well-formed matching workspace");
+          const workspace = matches[0]; const livePath = workspace.worktree?.checkout_path;
+          if (typeof livePath !== "string" || livePath !== expectedPath || fs.realpathSync(livePath) !== expectedPath || !["idle", "done"].includes(workspace.agent_status)) throw new Error(`workspace identity or agent state ${workspace.agent_status ?? "unknown"} is unsafe`);
           const removal = await herdr.worktreeRemove({ workspace: ticket.workspace, force: true }); state.tickets[ticketId] = { ...ticket, status: "cleaned", cleanupEvidence: { workspace: ticket.workspace, worktreePath: ticket.worktreePath, ...(ticket.patchEvidence ? { patchSha256: ticket.patchEvidence.sha256 } : {}), cleanedAt: new Date().toISOString(), resultType: removal?.type ?? "worktree_removed" } }; save(directory, state); cleaned.push(ticketId);
         } catch (error) { const reason = error instanceof Error ? error.message : String(error); retained.push({ ticketId, reason }); state.tickets[ticketId] = { ...ticket, cleanupFailure: { reason, attemptedAt: new Date().toISOString() } }; save(directory, state); }
       }

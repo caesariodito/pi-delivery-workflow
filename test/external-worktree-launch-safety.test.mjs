@@ -96,28 +96,64 @@ test("post-create verification blocks returned-path contradiction without remova
 });
 
 test("post-create workspace proof must be unique, well-formed, matching, and canonical before agent start", async () => {
-  for (const contradiction of ["missing", "duplicate", "malformed", "mismatch", "noncanonical"]) {
+  for (const contradiction of ["missing", "duplicate", "malformed", "option-workspace", "nul-workspace", "option-pane", "nul-pane", "mismatch", "noncanonical"]) {
     const f = fixture(); let agentStarted = false; const expected = path.join(f.worktreeRoot, "safe-run-T1"); const other = fs.mkdtempSync(path.join(os.tmpdir(), "delivery-launch-live-other-")); const alias = `${expected}-alias`;
     try {
       const output = await withHerdr(() => createDeliveryWorkflowCore({ herdr: herdr({
         async worktreeCreate({ path: worktreePath }) {
           execFileSync("git", ["worktree", "add", "--detach", worktreePath, f.baseSha], { cwd: f.root });
-          return { path: worktreePath, pane: "w1:p1", workspace: contradiction === "malformed" ? " w1" : "w1" };
+          return {
+            path: worktreePath,
+            pane: contradiction === "option-pane" ? "--pane" : contradiction === "nul-pane" ? "w1:\0p1" : "w1:p1",
+            workspace: contradiction === "malformed" ? " w1" : contradiction === "option-workspace" ? "--workspace" : contradiction === "nul-workspace" ? "w\u00001" : "w1",
+          };
         },
         async workspaceList() {
           if (contradiction === "missing") return { workspaces: [] };
           if (contradiction === "duplicate") return { workspaces: [{ workspace_id: "w1", worktree: { checkout_path: expected } }, { workspace_id: "w1", worktree: { checkout_path: expected } }] };
           if (contradiction === "malformed") return { workspaces: [{ workspace_id: " w1", worktree: { checkout_path: expected } }] };
+          if (contradiction === "option-workspace") return { workspaces: [{ workspace_id: "--workspace", worktree: { checkout_path: expected } }] };
+          if (contradiction === "nul-workspace") return { workspaces: [{ workspace_id: "w\u00001", worktree: { checkout_path: expected } }] };
+          if (["option-pane", "nul-pane"].includes(contradiction)) return { workspaces: [{ workspace_id: "w1", worktree: { checkout_path: expected } }] };
           if (contradiction === "mismatch") return { workspaces: [{ workspace_id: "w1", worktree: { checkout_path: other } }] };
           fs.symlinkSync(expected, alias); return { workspaces: [{ workspace_id: "w1", worktree: { checkout_path: alias } }] };
         },
         async agentStart() { agentStarted = true; assert.fail("workspace contradiction must block before agent start"); },
         async worktreeRemove() { assert.fail("created contradictory resource must be retained"); },
       }) }).start(f.root, input(f)));
-      assert.equal(agentStarted, false); assert.equal(output.details.tickets.T1.workspace, contradiction === "malformed" ? " w1" : "w1");
-      assert.match(output.details.tickets.T1.reason, contradiction === "mismatch" || contradiction === "noncanonical" ? /contradicts created worktree/ : contradiction === "malformed" ? /unexpected worktree, pane, or workspace/ : /exactly one well-formed matching workspace/);
+      assert.equal(agentStarted, false);
+      assert.match(output.details.tickets.T1.reason, contradiction === "mismatch" || contradiction === "noncanonical" ? /contradicts created worktree/ : ["missing", "duplicate"].includes(contradiction) ? /exactly one well-formed matching workspace/ : /unexpected worktree, pane, or workspace/);
     } finally { fs.rmSync(alias, { force: true }); fs.rmSync(other, { recursive: true, force: true }); cleanup(f); }
   }
+});
+
+test("cleanup retains duplicate workspace identities without removal", async () => {
+  const f = fixture(); const directory = path.join(f.root, ".scratch", "delivery", "safe-run"); const worktreePath = path.join(f.worktreeRoot, "safe-run-R1");
+  execFileSync("git", ["worktree", "add", "--detach", worktreePath, f.baseSha], { cwd: f.root });
+  const worktreeHead = git(worktreePath, "rev-parse", "HEAD"); fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(path.join(directory, "run.json"), `${JSON.stringify({ version: 2, ...input(f), tickets: [] }, null, 2)}\n`);
+  fs.writeFileSync(path.join(directory, "status.json"), `${JSON.stringify({ version: 2, runId: "safe-run", phase: "awaiting_cleanup", tickets: { R1: { status: "disposed", disposition: "approve", workspace: "w1", worktreePath, reviewEvidence: { before: { worktree: { head: worktreeHead } }, parentUnchanged: true, worktreeUnchanged: true } } } }, null, 2)}\n`);
+  const before = fs.readFileSync(path.join(directory, "status.json")); let removed = false;
+  try {
+    const output = await createDeliveryWorkflowCore({ herdr: herdr({
+      async workspaceList() { return { workspaces: [{ workspace_id: "w1", agent_status: "idle", worktree: { checkout_path: worktreePath } }, { workspace_id: "w1", agent_status: "idle", worktree: { checkout_path: worktreePath } }] }; },
+      async worktreeRemove() { removed = true; assert.fail("duplicate identity must retain workspace"); },
+    }) }).cleanup(f.root, { runId: "safe-run" });
+    assert.equal(removed, false); assert.deepEqual(output.details.cleaned, []); assert.match(output.details.retained[0].reason, /exactly one well-formed matching workspace/);
+    const after = JSON.parse(fs.readFileSync(path.join(directory, "status.json"))); const original = JSON.parse(before); assert.equal(after.tickets.R1.status, original.tickets.R1.status);
+  } finally { cleanup(f); }
+});
+
+test("reconcile rejects coordinated persisted run identity corruption without changing evidence", async () => {
+  const f = fixture(); const directory = path.join(f.root, ".scratch", "delivery", "safe-run"); fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(path.join(directory, "run.json"), `${JSON.stringify({ version: 2, ...input(f), runId: "other-run" }, null, 2)}\n`);
+  fs.writeFileSync(path.join(directory, "status.json"), `${JSON.stringify({ version: 2, runId: "other-run", phase: "blocked", tickets: {} }, null, 2)}\n`);
+  const beforeRun = fs.readFileSync(path.join(directory, "run.json")); const beforeStatus = fs.readFileSync(path.join(directory, "status.json")); let listed = false;
+  try {
+    const output = await createDeliveryWorkflowCore({ herdr: herdr({ async workspaceList() { listed = true; return { workspaces: [] }; } }) }).reconcile(f.root, { runId: "safe-run" });
+    assert.equal(output.isError, true); assert.equal(listed, false); assert.deepEqual(output.details.safeActions, ["inspect_and_retain"]); assert.match(output.content[0].text, /run identity/i);
+    assert.deepEqual(fs.readFileSync(path.join(directory, "run.json")), beforeRun); assert.deepEqual(fs.readFileSync(path.join(directory, "status.json")), beforeStatus);
+  } finally { cleanup(f); }
 });
 
 test("continue validates persisted root and every recorded worktree path before mutating state", async () => {

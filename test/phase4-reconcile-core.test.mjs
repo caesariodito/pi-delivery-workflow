@@ -11,6 +11,7 @@ function fixture(status, ticket = {}) {
   execFileSync("git", ["init", "-q"], { cwd: root }); execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: root }); execFileSync("git", ["config", "user.name", "Test"], { cwd: root });
   fs.writeFileSync(path.join(root, ".gitignore"), ".scratch/\n"); fs.writeFileSync(path.join(root, "tracked.txt"), "unchanged\n"); execFileSync("git", ["add", "."], { cwd: root }); execFileSync("git", ["commit", "-qm", "base"], { cwd: root });
   const directory = path.join(root, ".scratch", "delivery", "run-1"); fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(path.join(directory, "run.json"), `${JSON.stringify({ version: 2, runId: "run-1" }, null, 2)}\n`);
   fs.writeFileSync(path.join(directory, "status.json"), `${JSON.stringify({ version: 2, runId: "run-1", phase: "blocked", tickets: { T1: { status, ...ticket } } }, null, 2)}\n`);
   return { root, directory };
 }
