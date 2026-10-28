@@ -120,6 +120,98 @@ export function blockedByIntegration(tickets, states) {
   return tickets.some((ticket) => (states[ticket.id]?.status ?? "pending") === "pending" && ticket.dependencies.every((dependency) => validated(states[dependency])) && ticket.requiresIntegratedBase && ticket.dependencies.some((dependency) => !integrated(states[dependency])));
 }
 
+const PREFLIGHT_STOP_CONDITIONS = Object.freeze([
+  "ownership/dependency/product/API/architecture change",
+  "dirty required parent base",
+  "unsupported runtime field/tool",
+  "failed parent barrier",
+  "exhausted fix/remediation",
+  "unknown Herdr state",
+  "missing/malformed result",
+  "deadline",
+  "unexpected HEAD",
+  "dependency install",
+  "destructive action",
+  "reload during active phase",
+  "replay/replacement/merge/cleanup/publication required",
+]);
+
+export function preflightWarnings(run) {
+  const warnings = [];
+  for (const ticket of [...run.tickets].sort((a, b) => a.id.localeCompare(b.id))) {
+    if (ticket.validation.args.length === 0 || (ticket.validation.executable === "node" && ticket.validation.args.length === 1 && ticket.validation.args[0] === "--test")) warnings.push(Object.freeze({ code: "weak_validation", ticketId: ticket.id, message: "Validation does not name a focused target." }));
+    if (ticket.ownedPaths.some((item) => item.endsWith("/"))) warnings.push(Object.freeze({ code: "broad_ownership", ticketId: ticket.id, message: "Directory ownership grants a broad write scope." }));
+    if (!ticket.context || !ticket.context.observableBehavior?.length || !ticket.context.acceptanceExamples?.length || !ticket.context.invariants?.length) warnings.push(Object.freeze({ code: "thin_context", ticketId: ticket.id, message: "Context omits observable behavior, acceptance examples, or invariants." }));
+  }
+  return Object.freeze(warnings);
+}
+
+export function unweightedCriticalPath(tickets) {
+  const byId = new Map(tickets.map((ticket) => [ticket.id, ticket]));
+  const memo = new Map();
+  const pathTo = (ticketId) => {
+    if (memo.has(ticketId)) return memo.get(ticketId);
+    const dependencies = [...byId.get(ticketId).dependencies].sort();
+    const candidates = dependencies.map(pathTo);
+    const prefix = candidates.sort((a, b) => b.length - a.length || a.join("\0").localeCompare(b.join("\0")))[0] ?? [];
+    const result = Object.freeze([...prefix, ticketId]); memo.set(ticketId, result); return result;
+  };
+  const candidates = [...byId.keys()].sort().map(pathTo);
+  const ticketIds = candidates.sort((a, b) => b.length - a.length || a.join("\0").localeCompare(b.join("\0")))[0] ?? Object.freeze([]);
+  return Object.freeze({ ticketIds, length: ticketIds.length });
+}
+
+export function previewTicketGraph(run) {
+  const tickets = [...run.tickets].sort((a, b) => a.id.localeCompare(b.id));
+  const nodes = tickets.map((ticket) => Object.freeze({
+    id: ticket.id,
+    mode: ticket.mode,
+    dependencies: Object.freeze([...ticket.dependencies].sort()),
+    ownedPaths: Object.freeze([...ticket.ownedPaths]),
+    ...(ticket.mode === "review" ? { readPaths: Object.freeze([...ticket.readPaths]) } : {}),
+    requiresIntegratedBase: ticket.requiresIntegratedBase,
+    validation: Object.freeze({ executable: ticket.validation.executable, args: Object.freeze([...ticket.validation.args]), cwd: ticket.validation.cwd ?? ".", timeoutSeconds: ticket.validationTimeoutSeconds }),
+    worker: Object.freeze({ model: ticket.worker.model, thinking: ticket.worker.thinking, tools: Object.freeze([...ticket.worker.tools]) }),
+    maxFixRounds: ticket.maxFixRounds,
+    timeoutSeconds: ticket.timeoutSeconds,
+  }));
+  const edges = tickets.flatMap((ticket) => [...ticket.dependencies].sort().map((dependency) => Object.freeze({ from: dependency, to: ticket.id })));
+  const initialSlots = tickets.filter((ticket) => ticket.dependencies.length === 0).slice(0, run.maxConcurrency).map((ticket) => ticket.id);
+  const integrationGates = tickets.filter((ticket) => ticket.requiresIntegratedBase && ticket.dependencies.length).map((ticket) => Object.freeze({ ticketId: ticket.id, after: Object.freeze([...ticket.dependencies].sort()) }));
+  const reviewGates = tickets.filter((ticket) => ticket.mode === "review").map((ticket) => Object.freeze({ ticketId: ticket.id, dispositionRequired: "approve", dependenciesProceedOnlyAfterApproval: true }));
+  return Object.freeze({
+    version: 1,
+    runId: run.runId,
+    graph: Object.freeze({ nodes: Object.freeze(nodes), edges: Object.freeze(edges) }),
+    initialSlots: Object.freeze(initialSlots),
+    gates: Object.freeze({
+      integrationValidation: run.integrationValidation ? Object.freeze({ executable: run.integrationValidation.executable, args: Object.freeze([...run.integrationValidation.args]), cwd: run.integrationValidation.cwd ?? ".", timeoutSeconds: run.integrationValidation.timeoutSeconds }) : null,
+      integratedBase: Object.freeze(integrationGates),
+      reviewDisposition: Object.freeze(reviewGates),
+    }),
+    warnings: preflightWarnings(run),
+    criticalPath: unweightedCriticalPath(tickets),
+    stopConditions: PREFLIGHT_STOP_CONDITIONS,
+  });
+}
+
+export function renderTicketGraphMarkdown(run) {
+  const preview = previewTicketGraph(run); const lines = [`# Delivery preview: ${preview.runId}`, "", "## Graph"];
+  for (const node of preview.graph.nodes) lines.push(`- **${node.id}** (${node.mode}) <- ${node.dependencies.length ? node.dependencies.join(", ") : "root"}`);
+  lines.push("", "## Initial slots", ...(preview.initialSlots.length ? preview.initialSlots.map((id) => `- ${id}`) : ["- None"]), "", "## Gates");
+  lines.push(`- Integration validation: ${preview.gates.integrationValidation ? `\`${preview.gates.integrationValidation.executable}\` ${JSON.stringify(preview.gates.integrationValidation.args)}` : "None"}`);
+  for (const gate of preview.gates.integratedBase) lines.push(`- ${gate.ticketId}: integrated base after ${gate.after.join(", ")}`);
+  for (const gate of preview.gates.reviewDisposition) lines.push(`- ${gate.ticketId}: parent disposition \`${gate.dispositionRequired}\` required before dependencies proceed`);
+  lines.push("", "## Tickets");
+  for (const node of preview.graph.nodes) {
+    lines.push(`### ${node.id}`, `- Ownership: ${node.ownedPaths.length ? node.ownedPaths.map((item) => `\`${item}\``).join(", ") : "None"}`);
+    if (node.readPaths) lines.push(`- Read paths: ${node.readPaths.map((item) => `\`${item}\``).join(", ")}`);
+    lines.push(`- Validation argv: \`${node.validation.executable}\` ${JSON.stringify(node.validation.args)}`, `- Model: \`${node.worker.model}\`; thinking: \`${node.worker.thinking}\`; tools: ${node.worker.tools.map((item) => `\`${item}\``).join(", ")}`, `- Fix limit: ${node.maxFixRounds}; ticket timeout: ${node.timeoutSeconds}s; validation timeout: ${node.validation.timeoutSeconds}s`);
+  }
+  lines.push("", "## Critical path", `- ${preview.criticalPath.ticketIds.join(" -> ")} (${preview.criticalPath.length} tickets)`, "", "## Warnings", ...(preview.warnings.length ? preview.warnings.map((warning) => `- [${warning.code}] ${warning.ticketId}: ${warning.message}`) : ["- None"]), "", "## Stop conditions", ...preview.stopConditions.map((item) => `- ${item}`));
+  return `${lines.join("\n")}\n`;
+}
+
 export function parsePorcelainV1Z(value) {
   const fields = Buffer.isBuffer(value) ? value.toString("utf8").split("\0") : String(value).split("\0"); const changed = [];
   for (let index = 0; index < fields.length; index += 1) {
