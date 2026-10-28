@@ -5,7 +5,7 @@ import { execFile, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createHash, randomBytes } from "node:crypto";
 import { buildChildEnvironment, createHerdrAdapter } from "./lib/herdr.mjs";
-import { blockedByIntegration, buildContextPacket, parsePorcelainV1Z, readyTickets, validateRunInput, validateTicketResult } from "./lib/scheduler.mjs";
+import { buildContextPacket, parsePorcelainV1Z, validateRunInput, validateTicketResult } from "./lib/scheduler.mjs";
 
 export const WORKER_MODEL = "9router/cx/gpt-5.6-sol";
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -49,10 +49,15 @@ function digest(value) { return createHash("sha256").update(value).digest("hex")
 function patchPaths(directory, ticketId) { return { patch: path.join(directory, "patches", `${safeId(ticketId, "ticketId")}.patch`), metadata: path.join(directory, "patches", `${ticketId}.json`) }; }
 function summary(state) {
   const tickets = Object.values(state.tickets ?? {}); const count = (status) => tickets.filter((ticket) => ticket.status === status).length;
-  const counts = { running: count("running"), validated: count("validation_passed"), integrated: count("integrated"), eligible: count("integrated"), cleaned: count("cleaned"), retained: tickets.filter((ticket) => ["blocked", "failed", "stopped"].includes(ticket.status)).length };
-  const nextAction = counts.eligible ? `Run delivery_cleanup for ${counts.eligible} integrated ticket${counts.eligible === 1 ? "" : "s"}.` : counts.validated ? "Integrate exact validated patches and call delivery_continue." : counts.running ? "Inspect active Herdr agents." : "Inspect retained evidence and resources.";
+  const counts = { running: count("running"), reviewed: count("reviewed"), disposed: count("disposed"), validated: count("validation_passed"), integrated: count("integrated"), eligible: count("integrated") + count("disposed"), cleaned: count("cleaned"), retained: tickets.filter((ticket) => ["blocked", "failed", "stopped"].includes(ticket.status) || (ticket.status === "disposed" && ticket.disposition !== "approve")).length };
+  const nextAction = counts.reviewed ? `Run delivery_dispose for ${counts.reviewed} reviewed ticket${counts.reviewed === 1 ? "" : "s"}.` : counts.eligible ? `Run delivery_cleanup for ${counts.eligible} eligible ticket${counts.eligible === 1 ? "" : "s"}.` : counts.validated ? "Integrate exact validated patches and call delivery_continue." : counts.running ? "Inspect active Herdr agents." : "Inspect retained evidence and resources.";
   return { counts, nextAction };
 }
+function dependencyApproved(state) { return state?.status === "disposed" && state.disposition === "approve"; }
+function dependencyValidated(state) { return ["validation_passed", "integrated", "cleaned"].includes(state?.status) || dependencyApproved(state); }
+function dependencyIntegrated(state) { return ["integrated", "cleaned"].includes(state?.status) || dependencyApproved(state); }
+function coreReadyTickets(tickets, states) { return tickets.filter((ticket) => (states[ticket.id]?.status ?? "pending") === "pending" && ticket.dependencies.every((id) => dependencyValidated(states[id])) && (!ticket.requiresIntegratedBase || ticket.dependencies.every((id) => dependencyIntegrated(states[id])))).map((ticket) => ticket.id); }
+function coreBlockedByIntegration(tickets, states) { return tickets.some((ticket) => (states[ticket.id]?.status ?? "pending") === "pending" && ticket.dependencies.every((id) => dependencyValidated(states[id])) && ticket.requiresIntegratedBase && ticket.dependencies.some((id) => !dependencyIntegrated(states[id]))); }
 async function waitForInitialActivity(herdr, target, resultPath, deadlineMs, now = Date.now) {
   const activityDeadline = Math.min(deadlineMs, now() + 10_000);
   while (true) {
@@ -98,8 +103,9 @@ async function verifyRepository(repositoryPath, baseSha, worktreeRoot, herdr) {
 function owned(ticket, file) { return ticket.ownedPaths.some((claim) => claim.endsWith("/") ? file.startsWith(claim) : file === claim); }
 async function inspectWorkerTree(worktreePath, baseSha, ticket) {
   const head = (await git(worktreePath, ["rev-parse", "HEAD"])).trim();
-  const changes = parsePorcelainV1Z(await git(worktreePath, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]));
-  return { head, changes, violations: changes.filter((file) => !owned(ticket, file)), valid: head === baseSha && changes.every((file) => owned(ticket, file)) };
+  const rawStatus = await git(worktreePath, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
+  const changes = parsePorcelainV1Z(rawStatus);
+  return { head, changes, statusSha256: digest(rawStatus), statusBytes: Buffer.byteLength(rawStatus), violations: changes.filter((file) => !owned(ticket, file)), valid: head === baseSha && changes.every((file) => owned(ticket, file)) };
 }
 async function reconcileStartupFailure(herdr, target, created, worktreePath) {
   const evidence = { agent: null, workspace: null, errors: [] };
@@ -163,6 +169,12 @@ export function createDeliveryWorkflowCore({ herdr = createHerdrAdapter({ env: b
     worktreePath = path.join(worktreeRoot, `${run.runId}-${ticket.id}`); branch = `delivery/${run.runId}-${ticket.id}`;
     created = await herdr.worktreeCreate({ cwd: repositoryPath, branch, base: run.baseSha, path: worktreePath, label: `${run.runId} ${ticket.id}`, focus: false });
     if (path.resolve(created.path) !== path.resolve(worktreePath) || typeof created.pane !== "string" || typeof created.workspace !== "string") throw new Error("Herdr returned unexpected worktree, pane, or workspace.");
+    let reviewBefore = null;
+    if (ticket.mode === "review") {
+      try { reviewBefore = { parent: await parentSnapshot(repositoryPath), worktree: await inspectWorkerTree(worktreePath, run.baseSha, ticket) }; }
+      catch (error) { return terminal({ mode: "review", status: "blocked", reason: `review state unverifiable before launch: ${error instanceof Error ? error.message : String(error)}; workspace retained` }); }
+      if (!reviewBefore.parent.clean || reviewBefore.parent.head !== run.baseSha || reviewBefore.worktree.head !== run.baseSha || reviewBefore.worktree.changes.length) return terminal({ mode: "review", status: "blocked", reason: "review snapshots are not clean at immutable base; workspace retained", reviewEvidence: { before: reviewBefore } });
+    }
     currentPromptPath = path.join(directory, "prompts", `${ticket.id}.md`); currentResultPath = path.join(directory, "results", `${ticket.id}.json`); const bindingDir = path.join(ticketDir, "result-bindings"); const ticketNonce = nonce();
     const dependencyHandoffs = ticket.dependencies.map((dependency) => ({ ticketId: dependency, handoff: state.tickets[dependency].handoff }));
     const packet = buildContextPacket({ run, ticket, repositoryPath, worktreePath, promptPath: currentPromptPath, resultPath: currentResultPath, nonce: ticketNonce, dependencyHandoffs, guidance: state.guidance?.[ticket.id] ?? "" }); evidence.contextBytes = Buffer.byteLength(packet);
@@ -173,7 +185,7 @@ export function createDeliveryWorkflowCore({ herdr = createHerdrAdapter({ env: b
     const initialPrompt = `Read and follow the complete ticket context at ${currentPromptPath}. Call ${RESULT_TOOL} exactly once when settled.`;
     const startupStarted = performance.now(); const startupRemaining = remainingOperationTimeout(deadlineMs);
     if (startupRemaining <= 0) return terminal({ status: "blocked", reason: "ticket deadline expired before agent startup; workspace retained" });
-    try { await herdr.agentStart({ name: target, kind: ticket.worker.kind, pane: created.pane, timeout: startupRemaining, agentArgs: ["--model", ticket.worker.model, "--thinking", ticket.worker.thinking, "--extension", RESULT_EXTENSION, "--delivery-result-path", currentResultPath, "--delivery-result-nonce", ticketNonce, "--delivery-result-binding-dir", bindingDir, "--tools", tools.join(","), "--", initialPrompt] }); }
+    try { await herdr.agentStart({ name: target, kind: ticket.worker.kind, pane: created.pane, timeout: startupRemaining, agentArgs: ["--model", ticket.worker.model, "--thinking", ticket.worker.thinking, "--extension", RESULT_EXTENSION, "--delivery-result-path", currentResultPath, "--delivery-result-nonce", ticketNonce, "--delivery-result-binding-dir", bindingDir, ...(ticket.mode === "review" ? ["--delivery-result-mode", "review"] : []), "--tools", tools.join(","), "--", initialPrompt] }); }
     catch (error) {
       evidence.startupElapsedMs = Math.max(0, performance.now() - startupStarted);
       const message = error instanceof Error ? error.message : String(error); const reconciliation = await reconcileStartupFailure(herdr, target, created, worktreePath);
@@ -195,7 +207,17 @@ export function createDeliveryWorkflowCore({ herdr = createHerdrAdapter({ env: b
       const executionElapsedMs = Math.max(0, performance.now() - roundStarted); evidence.workerElapsedMs += executionElapsedMs;
       const round = { round: evidence.fixCount, promptPath: currentPromptPath, resultPath: currentResultPath, executionElapsedMs, waitElapsedMs: wait.elapsedMs ?? 0 }; evidence.rounds.push(round);
       if (!fs.existsSync(currentResultPath)) return terminal({ status: "blocked", reason: status === "blocked" ? "agent blocked without result file." : "agent settled without result file." });
-      agentResult = validateTicketResult(readJson(currentResultPath, 64 * 1024), ticket.id);
+      agentResult = validateTicketResult(readJson(currentResultPath, 64 * 1024), ticket.id, ticket.mode);
+      if (ticket.mode === "review") {
+        let reviewAfter;
+        try { reviewAfter = { parent: await parentSnapshot(repositoryPath), worktree: await inspectWorkerTree(worktreePath, run.baseSha, ticket) }; }
+        catch (error) { return terminal({ mode: "review", status: "blocked", reason: `review state unverifiable: ${error instanceof Error ? error.message : String(error)}`, verdict: "blocked", reviewResult: agentResult, reviewEvidence: { before: reviewBefore } }); }
+        const parentUnchanged = reviewAfter.parent.head === reviewBefore.parent.head && reviewAfter.parent.clean === reviewBefore.parent.clean && reviewAfter.parent.statusSha256 === reviewBefore.parent.statusSha256 && reviewAfter.parent.statusBytes === reviewBefore.parent.statusBytes;
+        const worktreeUnchanged = reviewAfter.worktree.head === reviewBefore.worktree.head && reviewAfter.worktree.statusSha256 === reviewBefore.worktree.statusSha256 && reviewAfter.worktree.statusBytes === reviewBefore.worktree.statusBytes && reviewAfter.worktree.changes.length === 0;
+        const reviewEvidence = { before: reviewBefore, after: reviewAfter, parentUnchanged, worktreeUnchanged };
+        if (!parentUnchanged || !worktreeUnchanged) return terminal({ mode: "review", status: "blocked", reason: !parentUnchanged ? "review mutated parent checkout; workspace retained" : "review mutated worktree; workspace retained", verdict: "blocked", reviewResult: agentResult, reviewEvidence });
+        return terminal({ mode: "review", status: "reviewed", verdict: agentResult.verdict, reviewResult: agentResult, reviewEvidence, reviewedAt: new Date().toISOString() });
+      }
       if (agentResult.status !== "done") return terminal({ status: agentResult.status, reason: agentResult.summary, question: agentResult.question ?? null, handoff: agentResult.handoff ?? "" });
       if (agentResult.validation === "failed") return terminal({ status: "failed", reason: "agent reported failed validation" });
       const beforeValidation = await inspectWorkerTree(worktreePath, run.baseSha, ticket);
@@ -245,22 +267,34 @@ export function createDeliveryWorkflowCore({ herdr = createHerdrAdapter({ env: b
         if (state.stopRequested || Object.values(state.tickets).some((ticket) => ["blocked", "failed", "stopped"].includes(ticket.status))) launchBlocked = true;
         if (!launchBlocked) {
           const slots = run.maxConcurrency - running.size;
-          for (const ticketId of readyTickets(run.tickets, state.tickets).slice(0, slots)) launch(ticketId);
+          for (const ticketId of coreReadyTickets(run.tickets, state.tickets).slice(0, slots)) launch(ticketId);
         }
         if (!running.size) break;
         const [, outcome] = await Promise.race(running.values());
-        if (outcome.status !== "validation_passed") launchBlocked = true;
+        if (!["validation_passed", "reviewed"].includes(outcome.status)) launchBlocked = true;
       }
       if (state.stopRequested) { state.phase = "stopped"; state.nextAction = "Inspect retained Herdr panes/worktrees."; save(directory, state); }
       else if (launchBlocked) { state.phase = "blocked"; state.nextAction = "Inspect retained Herdr pane/worktree and resolve blocker."; save(directory, state); }
-      else { const pending = Object.values(state.tickets).some((ticket) => ticket.status === "pending"); const awaiting = pending && blockedByIntegration(run.tickets, state.tickets); const unintegrated = Object.values(state.tickets).some((ticket) => ticket.status === "validation_passed"); const integrated = Object.values(state.tickets).some((ticket) => ticket.status === "integrated"); state.phase = awaiting || unintegrated ? "awaiting_integration" : pending ? "blocked" : integrated ? "awaiting_cleanup" : "done"; Object.assign(state, summary(state)); save(directory, state); }
+      else { const pending = Object.values(state.tickets).some((ticket) => ticket.status === "pending"); const reviewed = Object.values(state.tickets).some((ticket) => ticket.status === "reviewed"); const awaiting = pending && coreBlockedByIntegration(run.tickets, state.tickets); const unintegrated = Object.values(state.tickets).some((ticket) => ticket.status === "validation_passed"); const integrated = Object.values(state.tickets).some((ticket) => ticket.status === "integrated"); state.phase = reviewed ? "awaiting_disposition" : awaiting || unintegrated ? "awaiting_integration" : pending ? "blocked" : integrated ? "awaiting_cleanup" : "done"; Object.assign(state, summary(state)); save(directory, state); }
       return state;
     } finally { active.delete(directory); }
   }
 
   return Object.freeze({
     async start(repositoryPath, input) { const state = await run(repositoryPath, input, false); return result(`Delivery ${input.runId}: ${state.phase}. ${state.nextAction}`, state, state.phase === "blocked"); },
-    async status(repositoryPath, input) { const directory = runDir(repositoryPath, input.runId); if (!fs.existsSync(statePath(directory))) return result(`Run ${input.runId} not found.`, { status: "not_found" }, true); const state = readJson(statePath(directory)); const view = summary(state); const reasons = Object.entries(state.tickets ?? {}).filter(([, ticket]) => ticket.reason).map(([ticketId, ticket]) => `${ticketId}: ${ticket.reason}`); return result(`Delivery ${input.runId}: ${state.phase}. ${view.counts.running} running; ${view.counts.validated} validated; ${view.counts.integrated} integrated; ${view.counts.eligible} eligible; ${view.counts.cleaned} cleaned; ${view.counts.retained} retained.${reasons.length ? ` ${reasons.join("; ")}.` : ""} Next: ${view.nextAction}`, { ...state, ...view }); },
+    async status(repositoryPath, input) { const directory = runDir(repositoryPath, input.runId); if (!fs.existsSync(statePath(directory))) return result(`Run ${input.runId} not found.`, { status: "not_found" }, true); const state = readJson(statePath(directory)); const view = summary(state); const reasons = Object.entries(state.tickets ?? {}).filter(([, ticket]) => ticket.reason).map(([ticketId, ticket]) => `${ticketId}: ${ticket.reason}`); return result(`Delivery ${input.runId}: ${state.phase}. ${view.counts.running} running; ${view.counts.reviewed} reviewed; ${view.counts.disposed} disposed; ${view.counts.validated} validated; ${view.counts.integrated} integrated; ${view.counts.eligible} eligible; ${view.counts.cleaned} cleaned; ${view.counts.retained} retained.${reasons.length ? ` ${reasons.join("; ")}.` : ""} Next: ${view.nextAction}`, { ...state, ...view }); },
+    async dispose(repositoryPath, input) {
+      const directory = runDir(repositoryPath, input.runId); if (active.has(directory)) return result("Run is active; disposition refused.", { status: "active" }, true);
+      if (!["approve", "changes_requested", "blocked"].includes(input.disposition)) return result("Disposition must be approve, changes_requested, or blocked.", { status: "blocked" }, true);
+      const savedRun = readJson(path.join(directory, "run.json")); const state = readJson(statePath(directory)); const ticketId = safeId(input.ticketId, "ticketId"); const ticket = state.tickets?.[ticketId]; const definition = savedRun.tickets?.find((item) => item.id === ticketId);
+      if (definition?.mode !== "review" || ticket?.status !== "reviewed") return result("Ticket is not awaiting review disposition.", { status: ticket?.status ?? "not_found" }, true);
+      state.tickets[ticketId] = { ...ticket, status: "disposed", disposition: input.disposition, disposedAt: new Date().toISOString() };
+      const pending = Object.values(state.tickets).some((item) => item.status === "pending"); const adverse = input.disposition !== "approve";
+      state.phase = adverse ? "blocked" : pending ? "running" : "awaiting_cleanup"; Object.assign(state, summary(state)); save(directory, state);
+      if (adverse) { state.nextAction = "Parent must resolve review disposition; no downstream ticket launched."; save(directory, state); return result(`Review ${ticketId} disposed ${input.disposition}; run blocked.`, state); }
+      if (pending) { const next = await run(fs.realpathSync(repositoryPath), savedRun, true); return result(`Review ${ticketId} disposed approve. Delivery ${input.runId}: ${next.phase}. ${next.nextAction}`, next, next.phase === "blocked"); }
+      return result(`Review ${ticketId} disposed approve; cleanup now eligible.`, state);
+    },
     async steer(repositoryPath, input) { const directory = runDir(repositoryPath, input.runId); const running = active.get(directory); if (!running) return result("Run is not active in this Pi process; inspect Herdr and start a new supervised run if needed.", { status: "not_active" }, true); const ticket = running.state.tickets[safeId(input.ticketId, "ticketId")]; if (ticket?.status !== "running" || !ticket.target) return result("Ticket has no active target.", { status: "not_active" }, true); const liveState = parseAgentState(await herdr.agentGet(ticket.target)); if (liveState !== "working") return result(`Ticket agent is ${liveState}; guidance not sent.`, { status: "not_active", agentState: liveState }, true); await herdr.agentPrompt({ target: ticket.target, prompt: input.message, wait: false, timeout: 30_000 }); return result("Guidance sent; delivery is not proof of compliance.", { status: "sent", target: ticket.target }); },
     async stop(repositoryPath, input) { const directory = runDir(repositoryPath, input.runId); const running = active.get(directory); const state = fs.existsSync(statePath(directory)) ? readJson(statePath(directory)) : null; const targets = input.ticketId ? [state?.tickets?.[input.ticketId]].filter((ticket) => ticket?.status === "running") : Object.values(state?.tickets ?? {}).filter((ticket) => ticket.status === "running"); if (!targets.length) return result("No active recorded ticket target.", { status: "not_active" }, true); for (const ticket of targets) if (ticket.target) await herdr.agentSendKeys({ target: ticket.target, keys: ["ctrl+c"] }); if (running) { running.state.stopRequested = true; running.state.nextAction = "Wait for active tickets to settle; no new tickets will launch."; save(directory, running.state); } return result("Stop requested. No new ticket will launch; pane/worktree retained.", { status: "stop_requested", targets: targets.map((ticket) => ticket.target) }); },
     async continue(repositoryPath, input) { const directory = runDir(repositoryPath, input.runId); if (active.has(directory)) return result("Run is already active.", { status: "active" }, true); const savedRun = readJson(path.join(directory, "run.json")); const state = readJson(statePath(directory)); if (savedRun.version !== 2 || state.version !== 2) return result("Legacy run lacks immutable patch evidence and cannot continue.", { status: "blocked" }, true); if (state.phase !== "awaiting_integration") return result("Run is not awaiting integration.", { status: state.phase }, true); const root = fs.realpathSync(repositoryPath); if (input.integratedSha === state.baseSha || (await git(root, ["rev-parse", "HEAD"])).trim() !== input.integratedSha || (await git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])).length) return result("Integrated SHA must be a new clean current parent HEAD.", { status: "blocked" }, true); try { await git(root, ["merge-base", "--is-ancestor", state.baseSha, input.integratedSha]); } catch { return result("Integrated SHA must descend from prior base SHA.", { status: "blocked" }, true); }
@@ -278,13 +312,20 @@ export function createDeliveryWorkflowCore({ herdr = createHerdrAdapter({ env: b
     async cleanup(repositoryPath, input) { const directory = runDir(repositoryPath, input.runId); if (active.has(directory)) return result("Run is active; cleanup refused.", { status: "blocked", cleaned: [], alreadyCleaned: [], retained: [{ ticketId: "*", reason: "run active" }] }, true); const state = readJson(statePath(directory)); if (state.version !== 2) return result("Legacy run lacks immutable patch evidence; cleanup refused.", { status: "blocked", cleaned: [], alreadyCleaned: [], retained: [{ ticketId: "*", reason: "legacy evidence" }] }, true); const root = fs.realpathSync(repositoryPath); if ((await git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])).length) return result("Parent checkout must be clean; cleanup refused.", { status: "blocked", cleaned: [], alreadyCleaned: [], retained: [{ ticketId: "*", reason: "dirty parent" }] }, true); await herdr.status(); const live = await herdr.workspaceList(); if (!Array.isArray(live.workspaces)) return result("Herdr workspace state is malformed; cleanup refused.", { status: "blocked", cleaned: [], alreadyCleaned: [], retained: [{ ticketId: "*", reason: "unknown Herdr state" }] }, true); const byId = new Map(live.workspaces.map((workspace) => [workspace.workspace_id, workspace])); const cleaned = []; const alreadyCleaned = []; const retained = [];
       for (const [ticketId, ticket] of Object.entries(state.tickets).sort(([a], [b]) => a.localeCompare(b))) {
         if (ticket.status === "cleaned") { alreadyCleaned.push(ticketId); continue; }
-        if (ticket.status !== "integrated") { retained.push({ ticketId, reason: `status ${ticket.status}` }); continue; }
+        const reviewCleanup = ticket.status === "disposed";
+        if (ticket.status !== "integrated" && !reviewCleanup) { retained.push({ ticketId, reason: `status ${ticket.status}` }); continue; }
+        if (reviewCleanup && ticket.disposition !== "approve") { retained.push({ ticketId, reason: `disposition ${ticket.disposition}` }); continue; }
         try {
-          const head = (await git(root, ["rev-parse", "HEAD"])).trim(); await git(root, ["merge-base", "--is-ancestor", ticket.integrationEvidence.integratedSha, head]); await verifyIntegratedPatch(root, directory, ticketId, ticket);
+          const head = (await git(root, ["rev-parse", "HEAD"])).trim();
+          if (reviewCleanup) {
+            const reviewBase = ticket.reviewEvidence?.before?.worktree?.head;
+            const tree = await inspectWorkerTree(ticket.worktreePath, reviewBase, { ownedPaths: [] });
+            if (!reviewBase || tree.head !== reviewBase || tree.changes.length || ticket.reviewEvidence?.parentUnchanged !== true || ticket.reviewEvidence?.worktreeUnchanged !== true) throw new Error("review worktree mutation or unverifiable review evidence");
+          } else { await git(root, ["merge-base", "--is-ancestor", ticket.integrationEvidence.integratedSha, head]); await verifyIntegratedPatch(root, directory, ticketId, ticket); }
           const workspace = byId.get(ticket.workspace); const livePath = workspace?.worktree?.checkout_path; if (!workspace || path.resolve(livePath ?? "") !== path.resolve(ticket.worktreePath) || !["idle", "done"].includes(workspace.agent_status)) throw new Error(!workspace ? "workspace missing or unknown" : `workspace identity or agent state ${workspace.agent_status ?? "unknown"} is unsafe`);
-          const removal = await herdr.worktreeRemove({ workspace: ticket.workspace, force: true }); state.tickets[ticketId] = { ...ticket, status: "cleaned", cleanupEvidence: { workspace: ticket.workspace, worktreePath: ticket.worktreePath, patchSha256: ticket.patchEvidence.sha256, cleanedAt: new Date().toISOString(), resultType: removal?.type ?? "worktree_removed" } }; save(directory, state); cleaned.push(ticketId);
+          const removal = await herdr.worktreeRemove({ workspace: ticket.workspace, force: true }); state.tickets[ticketId] = { ...ticket, status: "cleaned", cleanupEvidence: { workspace: ticket.workspace, worktreePath: ticket.worktreePath, ...(ticket.patchEvidence ? { patchSha256: ticket.patchEvidence.sha256 } : {}), cleanedAt: new Date().toISOString(), resultType: removal?.type ?? "worktree_removed" } }; save(directory, state); cleaned.push(ticketId);
         } catch (error) { const reason = error instanceof Error ? error.message : String(error); retained.push({ ticketId, reason }); state.tickets[ticketId] = { ...ticket, cleanupFailure: { reason, attemptedAt: new Date().toISOString() } }; save(directory, state); }
       }
-      state.phase = Object.values(state.tickets).every((ticket) => ticket.status === "cleaned") ? "cleaned" : state.phase; Object.assign(state, summary(state)); save(directory, state); const isError = retained.some(({ ticketId }) => state.tickets[ticketId]?.status === "integrated"); return result(`Delivery ${input.runId}: ${cleaned.length} cleaned; ${alreadyCleaned.length} already cleaned; ${retained.length} retained.`, { status: isError ? "partial" : "ok", cleaned, alreadyCleaned, retained, ...summary(state) }, isError); },
+      state.phase = Object.values(state.tickets).every((ticket) => ticket.status === "cleaned") ? "cleaned" : state.phase; Object.assign(state, summary(state)); save(directory, state); const isError = retained.some(({ ticketId }) => ["integrated", "disposed"].includes(state.tickets[ticketId]?.status) && state.tickets[ticketId]?.disposition !== "changes_requested" && state.tickets[ticketId]?.disposition !== "blocked"); return result(`Delivery ${input.runId}: ${cleaned.length} cleaned; ${alreadyCleaned.length} already cleaned; ${retained.length} retained.`, { status: isError ? "partial" : "ok", cleaned, alreadyCleaned, retained, ...summary(state) }, isError); },
   });
 }

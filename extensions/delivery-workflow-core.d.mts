@@ -12,6 +12,7 @@ export function createDeliveryWorkflowCore(options?: DeliveryWorkflowCoreOptions
   status(repositoryPath: string, input: { runId: string }): Promise<ToolResult>;
   steer(repositoryPath: string, input: { runId: string; ticketId: string; message: string }): Promise<ToolResult>;
   continue(repositoryPath: string, input: { runId: string; integratedSha: string }): Promise<ToolResult>;
+  dispose(repositoryPath: string, input: { runId: string; ticketId: string; disposition: "approve" | "changes_requested" | "blocked" }): Promise<ToolResult>;
   cleanup(repositoryPath: string, input: { runId: string }): Promise<ToolResult>;
   stop(repositoryPath: string, input: { runId: string; ticketId?: string }): Promise<ToolResult>;
 }>;
