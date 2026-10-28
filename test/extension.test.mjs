@@ -78,16 +78,16 @@ test("scoped result tool advances once through parent-owned round binding", asyn
 });
 
 test("ambiguous agent start failure reconciles public state and retains workspace", async () => {
-  const fixture = repository(); const calls = [];
-  const herdr = { async status() {}, async integrationStatus() { return [{ name: "pi", status: "current (v1)" }]; }, async worktreeCreate({ path: worktreePath }) { calls.push("create"); return { path: worktreePath, pane: "w1:p1", workspace: "w1" }; }, async agentStart({ kind }) { assert.equal(kind, "pi"); calls.push("start"); throw new Error("transport lost after launch"); }, async agentGet() { calls.push("agentGet"); return { agent: { agent_status: "blocked" } }; }, async workspaceList() { calls.push("workspaceList"); return { workspaces: [{ workspace_id: "w1", agent_status: "blocked", worktree: { checkout_path: path.join(fixture.worktreeRoot, "run-1-T1") } }] }; }, async worktreeRemove() { assert.fail("ambiguous startup must retain workspace"); } };
+  const fixture = repository(); const calls = []; let launchedPath;
+  const herdr = { async status() {}, async integrationStatus() { return [{ name: "pi", status: "current (v1)" }]; }, async worktreeCreate({ path: worktreePath }) { calls.push("create"); launchedPath = worktreePath; execFileSync("git", ["worktree", "add", "--detach", worktreePath, fixture.sha], { cwd: fixture.root }); return { path: worktreePath, pane: "w1:p1", workspace: "w1" }; }, async agentStart({ kind }) { assert.equal(kind, "pi"); calls.push("start"); throw new Error("transport lost after launch"); }, async agentGet() { calls.push("agentGet"); return { agent: { agent_status: "blocked" } }; }, async workspaceList() { calls.push("workspaceList"); return { workspaces: [{ workspace_id: "w1", agent_status: "blocked", worktree: { checkout_path: fs.realpathSync(launchedPath) } }] }; }, async worktreeRemove() { assert.fail("ambiguous startup must retain workspace"); } };
   const previous = process.env.HERDR_ENV; process.env.HERDR_ENV = "1";
-  try { const output = await createDeliveryWorkflowCore({ herdr }).start(fixture.root, runInput(fixture.sha, fixture.worktreeRoot)); const ticket = output.details.tickets.T1; assert.equal(output.details.phase, "blocked"); assert.match(ticket.reason, /transport lost after launch; agent startup outcome uncertain, workspace retained/); assert.equal(ticket.startupReconciliation.identityMatches, true); assert.deepEqual(calls, ["create", "start", "agentGet", "workspaceList"]); }
+  try { const output = await createDeliveryWorkflowCore({ herdr }).start(fixture.root, runInput(fixture.sha, fixture.worktreeRoot)); const ticket = output.details.tickets.T1; assert.equal(output.details.phase, "blocked"); assert.match(ticket.reason, /transport lost after launch; agent startup outcome uncertain, workspace retained/); assert.equal(ticket.startupReconciliation.identityMatches, true); assert.deepEqual(calls, ["create", "workspaceList", "start", "agentGet", "workspaceList"]); }
   finally { if (previous === undefined) delete process.env.HERDR_ENV; else process.env.HERDR_ENV = previous; }
 });
 
 test("startup reconciliation failure preserves root error and retains workspace", async () => {
-  const fixture = repository(); let removed = false;
-  const herdr = { async status() {}, async integrationStatus() { return [{ name: "pi", status: "current (v1)" }]; }, async worktreeCreate({ path: worktreePath }) { return { path: worktreePath, pane: "w1:p1", workspace: "w1" }; }, async agentStart() { throw new Error("launch response malformed"); }, async agentGet() { throw new Error("agent state inaccessible"); }, async workspaceList() { return { blocked: true }; }, async worktreeRemove() { removed = true; } };
+  const fixture = repository(); let removed = false; let listed = 0;
+  const herdr = { async status() {}, async integrationStatus() { return [{ name: "pi", status: "current (v1)" }]; }, async worktreeCreate({ path: worktreePath }) { execFileSync("git", ["worktree", "add", "--detach", worktreePath, fixture.sha], { cwd: fixture.root }); return { path: worktreePath, pane: "w1:p1", workspace: "w1" }; }, async agentStart() { throw new Error("launch response malformed"); }, async agentGet() { throw new Error("agent state inaccessible"); }, async workspaceList() { listed += 1; return listed === 1 ? { workspaces: [{ workspace_id: "w1", worktree: { checkout_path: fs.realpathSync(path.join(fixture.worktreeRoot, "run-1-T1")) } }] } : { blocked: true }; }, async worktreeRemove() { removed = true; } };
   const previous = process.env.HERDR_ENV; process.env.HERDR_ENV = "1";
   try { const output = await createDeliveryWorkflowCore({ herdr }).start(fixture.root, runInput(fixture.sha, fixture.worktreeRoot)); const ticket = output.details.tickets.T1; assert.match(ticket.reason, /^launch response malformed;/); assert.deepEqual(ticket.startupReconciliation.errors, ["agentGet: agent state inaccessible", "workspaceList: malformed response"]); assert.equal(removed, false); }
   finally { if (previous === undefined) delete process.env.HERDR_ENV; else process.env.HERDR_ENV = previous; }
@@ -97,7 +97,8 @@ test("launch passes ticket as Pi initial prompt instead of terminal input", asyn
   const fixture = repository(); const calls = []; let polls = 0;
   const herdr = {
     async status() {}, async integrationStatus() { return [{ name: "pi", status: "current (v1)" }]; },
-    async worktreeCreate({ path: worktreePath }) { return { path: worktreePath, pane: "w1:p1", workspace: "w1" }; },
+    async worktreeCreate({ path: worktreePath }) { execFileSync("git", ["worktree", "add", "--detach", worktreePath, fixture.sha], { cwd: fixture.root }); return { path: worktreePath, pane: "w1:p1", workspace: "w1" }; },
+    async workspaceList() { return { workspaces: [{ workspace_id: "w1", worktree: { checkout_path: fs.realpathSync(path.join(fixture.worktreeRoot, "run-1-T1")) } }] }; },
     async agentStart({ agentArgs }) { calls.push("start"); const separator = agentArgs.lastIndexOf("--"); assert.ok(separator > 0); assert.match(agentArgs[separator + 1], /Read and follow the complete ticket context/); },
     async agentGet() { polls += 1; calls.push(`get:${polls}`); return { agent: { agent_status: polls > 2 ? "unknown" : polls > 1 ? "working" : "idle", interactive_ready: true } }; },
     async agentWait() { calls.push("wait"); throw new Error("stop after wait"); },
@@ -134,7 +135,7 @@ test("preflight accepts ignored scratch with previously tracked artifacts", asyn
 
 test("worktree root diagnostics run before Herdr launch checks", async () => {
   const fixture = repository(); let checked = false; const herdr = { async status() { checked = true; } }; const previous = process.env.HERDR_ENV; process.env.HERDR_ENV = "1";
-  try { await assert.rejects(createDeliveryWorkflowCore({ herdr }).start(fixture.root, runInput(fixture.sha, path.join(fixture.root, "missing"))), /existing real directory outside the repository/); assert.equal(checked, false); }
+  try { await assert.rejects(createDeliveryWorkflowCore({ herdr }).start(fixture.root, runInput(fixture.sha, path.join(fixture.root, "missing"))), /Provide worktreeRoot as a writable normalized absolute real directory outside the repository/); assert.equal(checked, false); }
   finally { if (previous === undefined) delete process.env.HERDR_ENV; else process.env.HERDR_ENV = previous; }
 });
 

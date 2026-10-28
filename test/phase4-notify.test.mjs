@@ -39,9 +39,9 @@ test("notifies only after blocked outcome persistence and keeps launch no-focus"
   const fixture = repository(); const calls = [];
   const herdr = {
     async status() {}, async integrationStatus() { return [{ name: "pi", status: "current (v1)" }]; },
-    async worktreeCreate(options) { calls.push(["create", options]); assert.equal(options.focus, false); assert.equal("rename" in options, false); return { path: options.path, pane: "w1:p1", workspace: "w1" }; },
+    async worktreeCreate(options) { calls.push(["create", options]); assert.equal(options.focus, false); assert.equal("rename" in options, false); execFileSync("git", ["worktree", "add", "--detach", options.path, fixture.sha], { cwd: fixture.root }); return { path: options.path, pane: "w1:p1", workspace: "w1" }; },
     async agentStart() { throw new Error("launch failed"); }, async agentGet() { return { agent: { agent_status: "blocked" } }; },
-    async workspaceList() { return { workspaces: [{ workspace_id: "w1", worktree: { checkout_path: path.join(fixture.worktreeRoot, "notify-run-T1") } }] }; },
+    async workspaceList() { return { workspaces: [{ workspace_id: "w1", worktree: { checkout_path: fs.realpathSync(path.join(fixture.worktreeRoot, "notify-run-T1")) } }] }; },
     async notify(options) { calls.push(["notify", options]); assert.equal(persistedTicket(fixture).status, "blocked"); return { type: "ok" }; },
   };
   const output = await withHerdrEnvironment(() => createDeliveryWorkflowCore({ herdr }).start(fixture.root, input(fixture)));
@@ -56,6 +56,7 @@ test("notification failure is reported without replacing validation failure", as
   const herdr = {
     async status() {}, async integrationStatus() { return [{ name: "pi", status: "current (v1)" }]; },
     async worktreeCreate(options) { assert.equal(options.focus, false); worktreePath = options.path; execFileSync("git", ["worktree", "add", "--detach", worktreePath, fixture.sha], { cwd: fixture.root }); return { path: worktreePath, pane: "w1:p1", workspace: "w1" }; },
+    async workspaceList() { return { workspaces: [{ workspace_id: "w1", worktree: { checkout_path: fs.realpathSync(worktreePath) } }] }; },
     async agentStart({ agentArgs }) { const resultPath = agentArgs[agentArgs.indexOf("--delivery-result-path") + 1]; fs.mkdirSync(path.dirname(resultPath), { recursive: true }); fs.writeFileSync(resultPath, JSON.stringify({ version: 1, ticketId: "T1", status: "done", summary: "done", changedPaths: [], validation: "passed", handoff: "none", question: null })); },
     async agentGet() { return { agent: { agent_status: "done" } }; },
     async notify() { assert.equal(persistedTicket(fixture).status, "failed"); throw new Error("desktop unavailable"); },

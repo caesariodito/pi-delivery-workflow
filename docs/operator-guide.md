@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-Verify Herdr `0.9.5`, protocol `22`, running server, `HERDR_ENV=1`, Pi, Git, clean checkout, ignored `.scratch/`, approved models, and external real worktree root.
+Verify Herdr `0.9.5`, protocol `22`, running server, `HERDR_ENV=1`, Pi, Git, clean checkout, ignored `.scratch/`, and approved models. Default worktrees use private persistent `~/.pi/delivery-worktrees/v1/<repo-slug>-<repo-id>`; `.scratch/` remains evidence-only. Pass `worktreeRoot` only to use an existing normalized absolute writable real directory outside repository. No temp fallback exists.
 
 ```bash
 herdr --version
@@ -14,7 +14,7 @@ herdr status --json
 1. Create reviewed specification, plan, context, and strict tickets.
 2. Run `delivery_preview`; inspect graph, initial slots, gates, ownership/read scope, argv, models/tools, limits, warnings, and critical path.
 3. Obtain explicit implementation approval.
-4. Call `delivery_start` with exact clean `baseSha`. Keep Pi process alive.
+4. Call `delivery_start` with exact clean `baseSha` and optional explicit `worktreeRoot`. Keep Pi process alive. New run persists canonical resolved root and `derived` or `override` provenance before launch; later operations reuse it.
 
 ```text
 /delivery_status {"runId":"run-1"}
@@ -96,7 +96,7 @@ Runtime rehashes patch and requires exact reverse applicability. Equivalent byte
 /delivery_cleanup {"runId":"run-1"}
 ```
 
-Cleanup removes only exact integrated implementation work or approved disposed review work when inactive and identity-matched. It preserves branches and `.scratch/` evidence. Pre-removal failure can be retried after correction. Removal-success/state-write-failure is ambiguous: inspect Herdr and evidence; never replay automatically.
+Cleanup removes only exact integrated implementation work or approved disposed review work when inactive and identity-matched. It preserves branches, `.scratch/` evidence, derived repository root, and all root parents; no pruning occurs. Pre-removal failure can be retried after correction. Removal-success/state-write-failure is ambiguous: inspect Herdr and evidence; never replay automatically.
 
 ## Publication playbook
 

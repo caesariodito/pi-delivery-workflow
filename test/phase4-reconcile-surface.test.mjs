@@ -22,7 +22,7 @@ test("delivery_reconcile registers exact read-only tool and command surface", ()
 
 test("delivery_reconcile routes only through read-only reconciliation core", () => {
   const reconcile = section(core, "    async reconcile(repositoryPath, input) {", "    async dispose(repositoryPath, input) {");
-  assert.match(reconcile, /reconcileObservations\(root, directory, state, herdr\)/);
+  assert.match(reconcile, /reconcileObservations\(root, directory, state, herdr, worktreeRoot, savedRun\.runId\)/);
   assert.match(reconcile, /analyzeReconciliation\(/);
   assert.doesNotMatch(reconcile, /\b(?:save|atomicJson|exclusiveJson|runValidation|executeTicket)\s*\(/);
   assert.doesNotMatch(reconcile, /herdr\.(?:worktreeCreate|worktreeRemove|agentStart|agentPrompt|agentSendKeys|agentStop)\s*\(/);

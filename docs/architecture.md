@@ -22,13 +22,14 @@ No package daemon exists. Package does not reproduce mission takeover, automatic
 - `extensions/delivery-workflow.ts` — `/delivery` and nine bounded public tools.
 - `extensions/delivery-workflow-core.mjs` — attached execution, status, reconcile, continuation, disposition, cleanup, and stop.
 - `extensions/lib/scheduler.mjs` — strict contracts, readiness, previews, context packets, reconciliation analysis, and metrics.
+- `extensions/lib/worktree-root.mjs` — standard-library canonical path, repository identity, private derived-root, and explicit-override resolution.
 - `extensions/lib/herdr.mjs` — argv-only Herdr `0.9.5`/protocol `22` adapter.
 - `extensions/reviewer-result-tool.ts` — nonce-bound implementation/review result writer.
 
 ## Execution
 
-1. Verify clean parent checkout, exact base SHA, paths, ownership, and graph.
-2. Create visible worktree/pane and start exact approved model/tools.
+1. Verify clean parent checkout, exact base SHA, paths, ownership, and graph. Resolve omitted root to canonical `~/.pi/delivery-worktrees/v1/<repo-slug>-<repo-id>` or validate explicit override; persist canonical root and provenance before launch.
+2. Create visible worktree/pane from persisted root evidence and start exact approved model/tools.
 3. Wait in slices no longer than 300 seconds until settlement or ticket deadline.
 4. Reconcile wait errors with live agent state. Known-active state may wait again while deadline remains; unknown state blocks.
 5. Read nonce-bound result. For implementation, run validation with its own timeout.
@@ -54,3 +55,7 @@ Best-effort desktop notification occurs only after failure/block persistence. No
 Parent owns product/architecture decisions, approvals, finding disposition, integration, explicit cleanup, acceptance, and publication. Package never merges, applies patches, deletes branches/evidence, changes provider/model, installs dependencies, or publishes.
 
 Worktrees isolate writers, not user OS. Read-only review tools narrow capability; Git snapshots detect mutation but are not sandboxing.
+
+Derived repository identity is full SHA-256 of `pi-delivery-worktree-root:v1\0` plus normalized canonical repository top-level path. Derived package-owned directories request private mode and reject symlinks, wrong ownership, or group/other write access where POSIX semantics apply. No temp fallback or root pruning exists. Explicit roots remain operator-owned and unchanged.
+
+Herdr accepts string paths, so local-user rename/symlink races cannot be eliminated. Runtime rechecks immediately before creation, verifies canonical returned path and Git identity immediately after, and retains any contradictory resource for inspection. Later status, reconciliation, continuation, disposition, and cleanup use persisted root/path evidence; they never rederive it.

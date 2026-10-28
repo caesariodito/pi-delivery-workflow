@@ -2,7 +2,7 @@
 
 ## 1. Prepare and preview
 
-Use clean Git checkout, ignored `.scratch/`, Herdr `0.9.5` protocol `22`, `HERDR_ENV=1`, approved models, and external worktree root.
+Use clean Git checkout, ignored `.scratch/`, Herdr `0.9.5` protocol `22`, `HERDR_ENV=1`, and approved models. Omit `worktreeRoot` for private persistent `~/.pi/delivery-worktrees/v1/<repo-slug>-<repo-id>`, or pass an existing normalized absolute writable real directory outside repository. No temp fallback exists; `.scratch/` stores evidence only.
 
 ```text
 /delivery Add project API-key rotation
@@ -16,7 +16,7 @@ Create reviewed spec/plan/context and bounded graph. Keep small work direct. Obt
 
 ## 2. Start and inspect
 
-Call `delivery_start` with same approved run plus `worktreeRoot`. Ready independent tickets run concurrently; free slots refill after settlement.
+Call `delivery_start` with same approved run and optional explicit `worktreeRoot`. Runtime persists canonical resolved root plus `derived` or `override` provenance before launch; later operations reuse it rather than current home/environment state. Ready independent tickets run concurrently; free slots refill after settlement.
 
 ```text
 /delivery_status {"runId":"key-rotation"}
@@ -63,4 +63,4 @@ After acceptance, inspect status and explicitly clean eligible worktrees:
 /delivery_cleanup {"runId":"key-rotation"}
 ```
 
-Cleanup preserves branches and `.scratch/` evidence. Run `npm run check` and `npm pack --dry-run` where applicable. Merge, push, tag, publish, deploy, and release remain separate parent-authorized actions outside Delivery.
+Cleanup preserves branches, `.scratch/` evidence, derived root, and root parents. Run `npm run check` and `npm pack --dry-run` where applicable. Merge, push, tag, publish, deploy, and release remain separate parent-authorized actions outside Delivery.

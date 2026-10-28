@@ -10,6 +10,9 @@
 - Exact reverse application at clean parent HEAD proves integration; ancestry alone does not.
 - Unknown Herdr state, missing result, deadline, ownership violation, failed validation, review mutation, or evidence mismatch blocks.
 - Parent owns finding disposition, integration, cleanup, publication, and destructive actions.
+- Omitted roots derive under canonical user profile at `~/.pi/delivery-worktrees/v1`; identity hashes normalized canonical repository path. Package-owned directories must remain private where POSIX ownership/mode checks apply. No temp fallback exists.
+- Explicit roots must already be normalized absolute writable real directories outside repository; package does not create or chmod them.
+- Resolved canonical root and provenance persist before launch. Later operations reuse persisted root/path evidence and never rederive it from current home, environment, or moved repository.
 
 ## Interruption and recovery boundary
 
@@ -39,6 +42,8 @@ Review worker receives `read` only plus scoped result writer. Runtime snapshots 
 
 Validation-passed, reviewed, blocked, failed, stopped, timed-out, running, unknown, mismatched, and legacy work retains resources. Best-effort notification follows persisted failure/block state; notification failure cannot replace root outcome.
 
-Explicit cleanup removes only evidence-backed integrated implementation work or approved disposed review work with inactive matching identity. Branches and runtime evidence remain. Package performs no reset, stash, branch deletion, automatic cleanup, pane-only close, merge, patch application, push, publish, deploy, or release.
+Explicit cleanup removes only evidence-backed integrated implementation work or approved disposed review work with inactive matching identity. Branches, runtime evidence, derived roots, and root parents remain; package never prunes roots. Package performs no reset, stash, branch deletion, automatic cleanup, pane-only close, merge, patch application, push, publish, deploy, or release.
+
+String-path Herdr calls leave a local-user rename/symlink TOCTOU ceiling. Runtime rechecks root immediately before creation and canonical path/Git identity immediately after. Any root, expected, returned, live, or persisted-path contradiction blocks and retains possibly created resources; it never deletes, replaces, or replays them.
 
 Cleanup retry is safe only after recorded pre-removal failure. Removal success followed by state-write failure is ambiguous; inspect Herdr and evidence, then stop rather than replay.
