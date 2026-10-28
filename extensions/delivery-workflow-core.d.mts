@@ -2,14 +2,17 @@ export const WORKER_MODEL: "9router/cx/gpt-5.6-sol";
 export function remainingOperationTimeout(deadlineMs: number, nowMs?: number): number;
 export function waitForAgentDeadline(herdr: Record<string, (...args: any[]) => Promise<unknown>>, target: string, deadlineMs: number, now?: () => number): Promise<{ timedOut: boolean; response?: unknown; status?: string; deadlineMs: number; elapsedMs: number }>;
 export function runValidation(spec: { executable: string; args: string[]; cwd?: string }, worktreePath: string, timeoutMs: number): Promise<{ passed: boolean; timedOut: boolean; outputExceeded: boolean; code: string | number; stdout: string; stderr: string; timeoutMs: number; elapsedMs: number }>;
-export type ToolResult = { content: Array<{ type: "text"; text: string }>; details: unknown; isError?: boolean };
+export type LifecycleCounts = Readonly<{ pending: number; running: number; validationPassed: number; integrated: number; cleaned: number; blocked: number; failed: number; stopped: number; timedOut: number }>;
+export type ReviewVerdictCounts = Readonly<{ approve: number; changes_requested: number; blocked: number }>;
+export type DeliveryStatusDetails = Record<string, unknown> & Readonly<{ lifecycle: LifecycleCounts; reviewVerdicts: ReviewVerdictCounts; retainedResources: readonly string[]; metrics: import("./lib/scheduler.mjs").RunMetrics | null; nextAction: string }>;
+export type ToolResult<Details = unknown> = { content: Array<{ type: "text"; text: string }>; details: Details; isError?: boolean };
 export type DeliveryWorkflowCoreOptions = {
   herdr?: Record<string, (...args: any[]) => Promise<any>>;
   nonce?: () => string;
 };
 export function createDeliveryWorkflowCore(options?: DeliveryWorkflowCoreOptions): Readonly<{
   start(repositoryPath: string, input: Record<string, unknown>): Promise<ToolResult>;
-  status(repositoryPath: string, input: { runId: string }): Promise<ToolResult>;
+  status(repositoryPath: string, input: { runId: string }): Promise<ToolResult<DeliveryStatusDetails | { status: "not_found" }>>;
   reconcile(repositoryPath: string, input: { runId: string }): Promise<ToolResult>;
   steer(repositoryPath: string, input: { runId: string; ticketId: string; message: string }): Promise<ToolResult>;
   continue(repositoryPath: string, input: { runId: string; integratedSha: string }): Promise<ToolResult>;
