@@ -132,6 +132,11 @@ export function analyzeReconciliation({ persistedTickets = {}, liveTickets = {},
     if (status === "validation_passed" && evidence?.validationPassed !== true) add("validation_evidence_missing", "Persisted validation-passed state lacks affirmative validation evidence.");
     if (status === "integrated" && (evidence?.integrationVerified !== true || git?.patchIntegrated !== true)) add("integration_evidence_missing", "Persisted integrated state lacks affirmative evidence and Git confirmation.");
     if (status === "reviewed" && !["approve", "changes_requested", "blocked"].includes(evidence?.reviewVerdict)) add("review_evidence_missing", "Persisted reviewed state lacks a structured review verdict.");
+    if (status === "disposed" && persisted?.disposition === "approve") {
+      if (evidence?.reviewVerdict !== "approve") add("disposed_review_approval_missing", "Approved disposed review lacks an affirmative structured approve verdict.");
+      if (evidence?.parentUnchanged !== true) add("disposed_review_parent_unchanged_missing", "Approved disposed review lacks affirmative unchanged parent evidence.");
+      if (evidence?.worktreeUnchanged !== true) add("disposed_review_worktree_unchanged_missing", "Approved disposed review lacks affirmative unchanged worktree evidence.");
+    }
     if (status === "cleaned" && (live?.workspacePresent === true || live?.worktreePresent === true || git?.worktreePresent === true)) add("cleaned_resource_present", "Persisted cleaned state contradicts an observed retained resource.");
     if (live?.agentStatus === "done" && !["validation_passed", "integrated", "cleaned"].includes(status)) add("live_done_not_proof", "Live completion is not proof of validation, integration, or cleanup.");
     contradictions.sort((a, b) => a.code.localeCompare(b.code) || a.message.localeCompare(b.message));

@@ -66,6 +66,36 @@ test("output and safe recommendations are deterministic", () => {
   assert.equal(expected.inferredSuccess, false);
 });
 
+test("approved disposed review requires affirmative verdict and unchanged evidence", () => {
+  const missing = analyzeReconciliation({
+    persistedTickets: { R1: { status: "disposed", disposition: "approve" } },
+    evidenceTickets: { R1: {} },
+  });
+  assert.deepEqual(missing.tickets[0].contradictions.map(({ code }) => code), [
+    "disposed_review_approval_missing",
+    "disposed_review_parent_unchanged_missing",
+    "disposed_review_worktree_unchanged_missing",
+  ]);
+  assert.equal(missing.tickets[0].recommendation.action, "inspect_and_retain");
+
+  for (const evidence of [
+    { reviewVerdict: "changes_requested", parentUnchanged: true, worktreeUnchanged: true },
+    { reviewVerdict: "approve", parentUnchanged: false, worktreeUnchanged: true },
+    { reviewVerdict: "approve", parentUnchanged: true, worktreeUnchanged: false },
+  ]) {
+    const adverse = analyzeReconciliation({ persistedTickets: { R1: { status: "disposed", disposition: "approve" } }, evidenceTickets: { R1: evidence } });
+    assert.equal(adverse.hasContradictions, true);
+    assert.equal(adverse.tickets[0].recommendation.action, "inspect_and_retain");
+  }
+
+  const approved = analyzeReconciliation({
+    persistedTickets: { R1: { status: "disposed", disposition: "approve" } },
+    evidenceTickets: { R1: { reviewVerdict: "approve", parentUnchanged: true, worktreeUnchanged: true } },
+  });
+  assert.equal(approved.hasContradictions, false);
+  assert.equal(approved.tickets[0].recommendation.action, "verify_then_cleanup");
+});
+
 test("live done alone remains contradiction, not validation success", () => {
   const result = analyzeReconciliation({ persistedTickets: { T1: { status: "running" } }, liveTickets: { T1: { agentStatus: "done" } } });
   assert.deepEqual(result.tickets[0].contradictions.map(({ code }) => code), ["live_done_not_proof", "running_agent_not_active"]);

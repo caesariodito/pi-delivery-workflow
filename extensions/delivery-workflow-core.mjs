@@ -159,7 +159,13 @@ async function reconcileObservations(root, directory, state, herdr) {
     liveTickets[ticketId] = { agentStatus: workspace?.agent_status ?? "unknown", workspacePresent: Boolean(workspace), worktreePresent: Boolean(livePath && fs.existsSync(livePath)), identityMatches: workspace ? Boolean(recordedPath && livePath && path.resolve(livePath) === path.resolve(recordedPath)) : undefined };
     let validationPassed = ticket.validation?.passed === true && Boolean(ticket.patchEvidence);
     if (ticket.patchEvidence) try { const metadata = readJson(ticket.patchEvidence.metadataPath); validationPassed &&= metadata.ticketId === ticketId && metadata.sha256 === ticket.patchEvidence.sha256; } catch { validationPassed = false; }
-    evidenceTickets[ticketId] = { validationPassed, integrationVerified: Boolean(ticket.integrationEvidence?.verifiedAt && ticket.integrationEvidence?.integratedSha), reviewVerdict: ticket.verdict ?? ticket.reviewResult?.verdict };
+    evidenceTickets[ticketId] = {
+      validationPassed,
+      integrationVerified: Boolean(ticket.integrationEvidence?.verifiedAt && ticket.integrationEvidence?.integratedSha),
+      reviewVerdict: ticket.verdict ?? ticket.reviewResult?.verdict,
+      parentUnchanged: ticket.reviewEvidence?.parentUnchanged,
+      worktreeUnchanged: ticket.reviewEvidence?.worktreeUnchanged,
+    };
     const observation = { worktreePresent: Boolean(recordedPath && fs.existsSync(recordedPath)), patchIntegrated: false };
     if (observation.worktreePresent) try { const tree = await inspectWorkerTree(recordedPath, ticket.patchEvidence?.baseSha ?? state.baseSha, { ownedPaths: [""] }); observation.worktreeHead = tree.head; observation.worktreeStatusSha256 = tree.statusSha256; observation.worktreeStatusBytes = tree.statusBytes; } catch (error) { observation.error = error instanceof Error ? error.message : String(error); }
     if (ticket.status === "integrated") try { await verifyIntegratedPatch(root, directory, ticketId, ticket); observation.patchIntegrated = true; } catch (error) { observation.integrationError = error instanceof Error ? error.message : String(error); }

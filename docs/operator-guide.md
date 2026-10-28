@@ -41,7 +41,7 @@ Use after process loss or state doubt. Inspect `contradictions`, `safeActions`, 
 ## Timeout and fix playbook
 
 - `timeoutSeconds` is ticket deadline. Runtime waits through repeated Herdr calls of at most 300 seconds and checks live state between calls.
-- Deadline expiry marks timed-out/blocked evidence and retains workspace. Do not kill, replay, or replace automatically.
+- Current runtime records ticket deadline expiry as `blocked` and retains workspace. `timed_out` is recognized only as persisted or external lifecycle evidence; current runtime does not create that state. Do not kill, replay, or replace automatically.
 - `validationTimeoutSeconds` bounds each validation. Expiry is validation failure.
 - `maxFixRounds: 1` permits one repair only for eligible validation failure. It reuses same agent/pane/worktree but creates fresh nonce, result, prompt, and log evidence. Scope and ownership remain unchanged.
 - After exhausted round or any unknown/block/ticket timeout, inspect and retain. Further work needs new parent decision/run.

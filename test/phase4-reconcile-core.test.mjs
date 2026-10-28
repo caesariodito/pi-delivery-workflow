@@ -27,6 +27,21 @@ for (const [status, expected] of [["pending", "await_scheduler"], ["running", "o
   if (["validation_passed", "integrated", "cleaned"].includes(status)) assert.equal(output.details.hasContradictions, true); else assert.equal(output.details.tickets[0].recommendation.action, expected);
 });
 
+test("reconcile flows disposed review verdict and unchanged evidence into cleanup analysis", async () => {
+  const reviewEvidence = { parentUnchanged: true, worktreeUnchanged: true };
+  const approved = fixture("disposed", { disposition: "approve", verdict: "approve", reviewEvidence });
+  const herdr = { async workspaceList() { return { workspaces: [] }; } };
+  const output = await createDeliveryWorkflowCore({ herdr }).reconcile(approved.root, { runId: "run-1" });
+  assert.equal(output.details.hasContradictions, false);
+  assert.equal(output.details.tickets[0].recommendation.action, "verify_then_cleanup");
+
+  const adverse = fixture("disposed", { disposition: "approve", verdict: "approve", reviewEvidence: { ...reviewEvidence, parentUnchanged: false } });
+  const blocked = await createDeliveryWorkflowCore({ herdr }).reconcile(adverse.root, { runId: "run-1" });
+  assert.equal(blocked.isError, true);
+  assert.deepEqual(blocked.details.tickets[0].contradictions.map(({ code }) => code), ["disposed_review_parent_unchanged_missing"]);
+  assert.equal(blocked.details.tickets[0].recommendation.action, "inspect_and_retain");
+});
+
 test("reconcile reports bounded contradictory observations and safe retain action", async () => {
   const run = fixture("running", { workspace: "w1", worktreePath: "/recorded/path" }); const calls = [];
   const herdr = { async workspaceList() { calls.push("workspaceList"); return { workspaces: [{ workspace_id: "w1", agent_status: "done", worktree: { checkout_path: "/other/path" } }] }; }, async worktreeRemove() { assert.fail("mutator called"); } };

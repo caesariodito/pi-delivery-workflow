@@ -41,7 +41,7 @@ No package daemon exists. Package does not reproduce mission takeover, automatic
 
 ## State and observability
 
-`run.json` and `status.json` are inspection records, not transactional journal. Status distinguishes pending, running, validation-passed, integrated, cleaned, blocked, failed, stopped, timed-out, reviewed, and disposed work. It also reports retained resources, verdict counts, exact next action, and metrics.
+`run.json` and `status.json` are inspection records, not transactional journal. Status distinguishes pending, running, validation-passed, integrated, cleaned, blocked, failed, stopped, timed-out, reviewed, and disposed work. Current runtime persists ticket deadline expiry as blocked; timed-out is recognized persisted or external lifecycle evidence, not a state current deadline handling creates. Status also reports retained resources, verdict counts, exact next action, and metrics.
 
 Metrics contain wall time, worker time, utilization, weighted critical path, validation/fix/block/review/cleanup counts, missing timing, and incomplete flags. Missing evidence yields `null` and flags, not zero.
 
