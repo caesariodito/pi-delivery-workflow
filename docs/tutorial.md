@@ -1,62 +1,66 @@
 # Tutorial
 
-## 1. Prepare
+## 1. Prepare and preview
 
-Use clean Git checkout, ignored `.scratch/`, Herdr `0.9.5` protocol `22`, and `HERDR_ENV=1`.
-
-## 2. Plan
+Use clean Git checkout, ignored `.scratch/`, Herdr `0.9.5` protocol `22`, `HERDR_ENV=1`, approved models, and external worktree root.
 
 ```text
 /delivery Add project API-key rotation
 ```
 
-Keep small work direct. For workflow work, create reviewed `spec.md`, `plan.md`, `context.md`, and bounded ticket graph. Obtain explicit implementation approval covering models, tools, ownership, validation, concurrency, and stop conditions.
+Create reviewed spec/plan/context and bounded graph. Keep small work direct. Obtain explicit implementation approval after:
 
-## 3. Start
-
-```json
-{
-  "runId": "key-rotation",
-  "objective": "Add project API-key rotation",
-  "baseSha": "0123456789012345678901234567890123456789",
-  "worktreeRoot": "/tmp/herdr-key-rotation",
-  "contextPaths": [".scratch/key-rotation/spec.md", ".scratch/key-rotation/plan.md"],
-  "maxConcurrency": 2,
-  "tickets": []
-}
+```text
+/delivery_preview {"runId":"key-rotation","objective":"Add project API-key rotation","baseSha":"0123456789012345678901234567890123456789","contextPaths":[".scratch/key-rotation/spec.md"],"maxConcurrency":2,"tickets":[...]}
 ```
 
-Use [ticket contract](ticket-contract.md) for ticket objects. `delivery_start` runs attached. Ready independent tickets launch concurrently in visible Herdr worktrees.
+## 2. Start and inspect
 
-## 4. Inspect and supervise
+Call `delivery_start` with same approved run plus `worktreeRoot`. Ready independent tickets run concurrently; free slots refill after settlement.
 
 ```text
 /delivery_status {"runId":"key-rotation"}
 /delivery_steer {"runId":"key-rotation","ticketId":"T001","message":"Keep API shape from SEC-2."}
 ```
 
-Each prompt packet and result lives under `.scratch/delivery/key-rotation/`. Inspect live pane/worktree in Herdr.
+Inspect live Herdr pane/worktree and `.scratch/delivery/key-rotation/` evidence. Status includes lifecycle, review verdicts, retained resources, metrics, incomplete flags, and next action.
 
-## 5. Integrate
+## 3. Handle timeout or interruption
 
-Parent manually integrates accepted completed branches. Dependent code tickets wait at `awaiting_integration`. After clean commit:
+Do not reload, replay, or replace ambiguous work. Inspect Herdr and evidence. Use:
+
+```text
+/delivery_reconcile {"runId":"key-rotation"}
+```
+
+Reconcile is read-only. Contradictions require inspection/retention. Ticket deadline retains workspace; validation timeout may use only approved one-round same-agent repair.
+
+## 4. Integrate
+
+Parent manually integrates accepted exact patches into clean checkout, runs checks, and commits. Then:
 
 ```text
 /delivery_continue {"runId":"key-rotation","integratedSha":"<current-head>"}
 ```
 
-Text-only dependents may declare `requiresIntegratedBase: false` and consume concise handoffs immediately.
+Runtime verifies exact patch and optional integration validation before downstream launch. Text-only dependents may use `requiresIntegratedBase: false`.
 
-## 6. Handle failure
+## 5. Review and dispose
 
-Blocked, failed, unknown, timeout, or interrupted work remains visible and retained. Do not replay ambiguous prompts. No daemon resumes workflow after Pi exits. Operator inspects and chooses whether to start a new supervised run.
+Review ticket has empty ownership, explicit read paths, `read` only, and parent-run checks. Inspect structured verdict/findings and Git snapshots. Record parent decision:
 
-## 7. Finish
+```text
+/delivery_dispose {"runId":"key-rotation","ticketId":"R001","disposition":"approve"}
+```
 
-Parent performs acceptance and integrates exact validated patches. Check status, then explicitly remove all eligible integrated worktrees:
+Use `changes_requested` or `blocked` when warranted. No automatic acceptance or fix occurs.
+
+## 6. Finish and publish separately
+
+After acceptance, inspect status and explicitly clean eligible worktrees:
 
 ```text
 /delivery_cleanup {"runId":"key-rotation"}
 ```
 
-Cleanup preserves branches and `.scratch/` evidence. Automatic cleanup, merge, push, publish, deploy, and release remain excluded.
+Cleanup preserves branches and `.scratch/` evidence. Run `npm run check` and `npm pack --dry-run` where applicable. Merge, push, tag, publish, deploy, and release remain separate parent-authorized actions outside Delivery.

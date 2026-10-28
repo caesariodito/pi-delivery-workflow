@@ -57,5 +57,12 @@ test("packed package contains thin Herdr workflow, scoped result tool, scheduler
     "extensions/lib/herdr.mjs",
     "extensions/lib/scheduler.mjs",
     "skills/delivery-workflow/SKILL.md",
+    "docs/architecture.md",
+    "docs/operator-guide.md",
+    "docs/safety-and-recovery.md",
+    "docs/ticket-contract.md",
+    "docs/tutorial.md",
+    "README.md",
+    "CONTRIBUTING.md",
   ]) assert.ok(files.has(expected), `packed package missing ${expected}`);
 });

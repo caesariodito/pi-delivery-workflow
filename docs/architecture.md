@@ -4,49 +4,53 @@
 
 ```text
 Pi parent
-  ├─ validates approved ticket graph
-  ├─ writes bounded ticket context packets
-  ├─ launches ready work through Herdr
-  ├─ waits for result and runs validation
-  ├─ records concise handoff
-  └─ pauses for parent integration when needed
+  ├─ previews and validates approved graph
+  ├─ writes bounded context packets
+  ├─ fills ready slots through Herdr
+  ├─ reconciles waits, validates, and records evidence
+  ├─ pauses at integration/review gates
+  └─ exposes read-only status, metrics, and reconcile
 
 Herdr
   └─ owns visible worktrees, panes, and agent processes
 ```
 
-No package daemon exists. Package does not reproduce pi-subagents missions, journals, takeover, automatic reviewer loops, or transparent recovery.
+No package daemon exists. Package does not reproduce mission takeover, automatic reviewer loops, or transparent recovery.
 
 ## Components
 
-- `extensions/delivery-workflow.ts` — `/delivery` and six bounded tools, including explicit cleanup.
-- `extensions/delivery-workflow-core.mjs` — attached orchestration, status, steer, stop, continuation.
-- `extensions/lib/scheduler.mjs` — graph validation, readiness, context packet generation.
-- `extensions/lib/herdr.mjs` — argv-only Herdr CLI adapter for baseline `0.9.5`, protocol `22`.
-- `extensions/reviewer-result-tool.ts` — nonce-bound ticket result writer.
+- `extensions/delivery-workflow.ts` — `/delivery` and nine bounded public tools.
+- `extensions/delivery-workflow-core.mjs` — attached execution, status, reconcile, continuation, disposition, cleanup, and stop.
+- `extensions/lib/scheduler.mjs` — strict contracts, readiness, previews, context packets, reconciliation analysis, and metrics.
+- `extensions/lib/herdr.mjs` — argv-only Herdr `0.9.5`/protocol `22` adapter.
+- `extensions/reviewer-result-tool.ts` — nonce-bound implementation/review result writer.
 
-## Ticket execution
+## Execution
 
-1. Verify clean parent checkout and exact base SHA.
-2. Create visible Herdr worktree and pane.
-3. Write `.scratch/delivery/<run>/prompts/<ticket>.md`.
-4. Start approved Pi model/tools in returned pane.
-5. Prompt agent with context-packet path.
-6. Wait for settled Herdr state and nonce-bound result file.
-7. Run ticket validation with executable/argv and `shell: false`.
-8. Read Git status, reject paths outside ownership, capture a binary temporary-index patch plus SHA-256 digest, and write handoff.
-9. Mark ticket `validation_passed`; launch text-only dependents or pause for exact parent integration.
-10. At `delivery_continue`, reverse-check each validated patch against clean current parent HEAD before marking it `integrated`.
-11. At explicit `delivery_cleanup`, recheck evidence/live identity, force-remove eligible Herdr worktrees, and mark them `cleaned`.
+1. Verify clean parent checkout, exact base SHA, paths, ownership, and graph.
+2. Create visible worktree/pane and start exact approved model/tools.
+3. Wait in slices no longer than 300 seconds until settlement or ticket deadline.
+4. Reconcile wait errors with live agent state. Known-active state may wait again while deadline remains; unknown state blocks.
+5. Read nonce-bound result. For implementation, run validation with its own timeout.
+6. On validation failure only, use at most approved `maxFixRounds` (`0..1`) with same agent/pane/worktree and fresh nonce/result/log.
+7. Check Git ownership, persist binary-capable patch/digest and handoff, then mark `validation_passed`.
+8. Persist each settlement, refill free slots, and stop new launch after first non-success while active tickets drain.
+9. At `delivery_continue`, prove exact integration at clean HEAD and run optional bounded integration validation before downstream launch.
+10. For review, snapshot review and parent Git state before/after, record structured verdict, and wait for parent disposition.
+11. At explicit cleanup, recheck evidence/live identity and remove only eligible inactive worktrees.
 
-Context packet carries objective, goal, done criteria, paths, base, ownership, dependencies, concise handoffs, source-document pointers, validation, model/tools, guidance, result schema, and escalation rules.
+## State and observability
 
-## State
+`run.json` and `status.json` are inspection records, not transactional journal. Status distinguishes pending, running, validation-passed, integrated, cleaned, blocked, failed, stopped, timed-out, reviewed, and disposed work. It also reports retained resources, verdict counts, exact next action, and metrics.
 
-`run.json` and `status.json` are inspection records. Prompt, result, handoff, validation log, immutable patch, and digest metadata remain readable under ignored `.scratch/`. Patch evidence is written before `validation_passed`; integration evidence before `integrated`; cleanup evidence after confirmed removal. Records still are not a transactional journal. If orchestrator dies or removal succeeds before state persistence, operator inspects Herdr and evidence; package never replays ambiguous cleanup.
+Metrics contain wall time, worker time, utilization, weighted critical path, validation/fix/block/review/cleanup counts, missing timing, and incomplete flags. Missing evidence yields `null` and flags, not zero.
+
+`delivery_reconcile` observes persisted records, Herdr workspace state, evidence, and Git. It returns contradictions and non-mutating recommendations. It never infers success, writes status, resumes, replays, stops, replaces, integrates, or cleans.
+
+Best-effort desktop notification occurs only after failure/block persistence. Notification failure is recorded without replacing root outcome. Launch does not focus panes.
 
 ## Authority and limits
 
-Parent owns product/architecture decisions, ticket approval, integration, explicit cleanup invocation, and publication. Package may launch approved ready tickets, validate, verify exact integration, and remove only evidence-backed integrated worktrees after `delivery_cleanup`. It never merges, applies patches, deletes branches/runtime evidence, changes model/provider, installs dependencies, or replays ambiguous actions.
+Parent owns product/architecture decisions, approvals, finding disposition, integration, explicit cleanup, acceptance, and publication. Package never merges, applies patches, deletes branches/evidence, changes provider/model, installs dependencies, or publishes.
 
-Worktrees isolate writers from each other, not from user OS. Package checks Git ownership; it does not claim filesystem sandboxing.
+Worktrees isolate writers, not user OS. Read-only review tools narrow capability; Git snapshots detect mutation but are not sandboxing.

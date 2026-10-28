@@ -2,9 +2,7 @@
 
 Visible, supervised ticket delivery for Pi through Herdr.
 
-Package keeps `/delivery`, turns an approved dependency graph into bounded context packets, launches ready Pi agents in separate Herdr worktrees, runs ticket validation, and records concise handoffs. Herdr remains inspection/control surface. Parent remains authority for decisions, integration, cleanup, and publication.
-
-Small linear work stays direct.
+Package keeps `/delivery`, turns an approved dependency graph into bounded context packets, launches ready Pi agents in separate Herdr worktrees, runs bounded validation, and records inspection evidence. Herdr remains inspection/control surface. Parent remains authority for decisions, review disposition, integration, cleanup, and publication. Small linear work stays direct.
 
 ## Requirements
 
@@ -16,7 +14,7 @@ Small linear work stays direct.
 - clean parent checkout
 - ignored `.scratch/`
 
-Package does not install, start, or upgrade Herdr. Missing or unknown state blocks. No model fallback.
+Package does not install, start, or upgrade Herdr. Missing, contradictory, or unknown state blocks. No model fallback.
 
 ## Install
 
@@ -26,7 +24,7 @@ herdr --version
 herdr status --json
 ```
 
-Restart Pi or run `/reload`.
+Restart Pi or run `/reload` only when no delivery run is active or awaiting integration/cleanup.
 
 ## Start
 
@@ -34,84 +32,58 @@ Restart Pi or run `/reload`.
 /delivery Add refresh-token rotation
 ```
 
-After plan/ticket approval, call `delivery_start` with object fields:
+After plan/ticket approval, use `delivery_preview`, then call `delivery_start` with `runId`, objective, exact `baseSha`, external absolute `worktreeRoot`, approved context paths, concurrency `1..8`, optional integration validation, and tickets from [ticket contract](docs/ticket-contract.md).
 
-- `runId`, `objective`, exact `baseSha`;
-- normalized absolute `worktreeRoot` naming an existing real directory outside repository;
-- `contextPaths` referencing relevant approved files;
-- `maxConcurrency` from 1–8;
-- ticket array described in [ticket contract](docs/ticket-contract.md).
-
-`delivery_start` stays attached to current Pi process while batch runs. It launches all dependency-ready tickets up to concurrency, waits for Herdr settlement, validates results, writes handoffs, then launches newly ready textual dependencies. Tickets needing integrated code pause at `awaiting_integration`.
+Runtime uses an event-driven pool: ready tickets fill free slots; each settlement is persisted; first non-success stops new launch while already-active tickets drain. Tickets needing integrated code pause at `awaiting_integration`.
 
 ## Tools
 
 | Tool | Behavior |
 | --- | --- |
+| `delivery_preview` | Validate/render graph, gates, warnings, limits, and critical path without launch |
 | `delivery_start` | Run approved graph visibly in current Pi process |
-| `delivery_status` | Read persisted inspection status |
+| `delivery_status` | Read lifecycle, review verdicts, retained resources, metrics, and next action |
+| `delivery_reconcile` | Read-only comparison of persisted, Herdr, evidence, and Git state |
 | `delivery_steer` | Prompt exact currently active agent |
-| `delivery_continue` | Verify exact validated patches at clean integrated HEAD, then continue |
-| `delivery_cleanup` | Explicitly force-remove all eligible integrated Herdr worktrees; preserve branches/evidence |
+| `delivery_continue` | Verify exact integrated patches, run optional integration validation, then continue |
+| `delivery_dispose` | Record parent disposition for reviewed ticket |
+| `delivery_cleanup` | Explicitly remove eligible integrated Herdr worktrees; preserve branches/evidence |
 | `delivery_stop` | Send `Ctrl+C`; retain pane/worktree |
 
 Same-name slash commands accept JSON. `/delivery` accepts free text.
 
-## Runtime evidence
+## Evidence and limits
 
-```text
-.scratch/delivery/<run-id>/
-  run.json
-  status.json
-  prompts/<ticket>.md
-  results/<ticket>.json
-  handoffs/<ticket>.json
-  logs/<ticket>.log
-  patches/<ticket>.patch
-  patches/<ticket>.json
-```
+Evidence lives under `.scratch/delivery/<run-id>/`: run/status JSON, prompts, nonce-bound results, handoffs, logs, patches, and patch metadata. This supports inspection, not transparent crash recovery.
 
-This state supports inspection, not transparent crash recovery. If Pi/workflow dies, inspect retained Herdr agents and worktrees. Start a new supervised run if needed. Never replay an ambiguous prompt or external action automatically.
+- One writer per worktree; ownership cannot overlap.
+- Commands are executable plus argv with `shell: false`.
+- Git determines changed paths; result claims remain advisory.
+- Herdr wait calls remain at most 300 seconds; longer ticket deadlines use repeated waits.
+- Ticket timeout retains workspace without kill or replacement.
+- Validation timeout is a failure. An approved `maxFixRounds: 1` permits one same-agent, same-worktree repair with fresh immutable evidence.
+- Review workers receive `read` only plus scoped result writer. Git snapshots detect mutation but do not create an OS sandbox.
+- No automatic merge, patch application, replay, replacement, review acceptance, cleanup, push, publish, deploy, or release.
 
-## Execution rules
+## Integration and review
 
-- Herdr creates visible worktree/pane and starts exact approved model/tools.
-- Each agent receives one bounded Markdown context packet.
-- One writer owns each worktree; ticket ownership cannot overlap.
-- Agent writes one nonce-bound result through scoped `delivery_result_write`.
-- Git determines changed paths; agent claims are advisory.
-- Validation uses executable plus argv with `shell: false`.
-- Successful validation records a binary-capable patch and SHA-256 digest before `validation_passed`.
-- Blocked, failed, unknown, timed-out, or unintegrated work retains pane/worktree.
-- No automatic reviewer/fix loop in core scheduler.
-- No automatic merge, patch application, cleanup, branch deletion, push, publish, deploy, or release.
-
-## Integration
-
-At `awaiting_integration`, parent inspects branches, worktrees, changed paths, validation, and handoffs. Parent integrates accepted work manually and commits. Then:
+Parent inspects output, manually integrates accepted work, commits, then calls:
 
 ```text
 /delivery_continue {"runId":"refresh-token","integratedSha":"<current-clean-head>"}
 ```
 
-`delivery_continue` marks each `validation_passed` ticket `integrated` only when its exact persisted patch reverse-applies at the supplied clean current HEAD. Ancestry alone is insufficient. Dependent tickets start with concise dependency handoffs and supplied base. Tickets consuming textual handoffs can run before code integration when `requiresIntegratedBase` is `false`.
+Exact persisted patch must reverse-apply at supplied clean HEAD. Optional integration validation runs before downstream launch.
 
-After final integration, inspect status and clean eligible workspaces explicitly:
+Review verdicts are `approve`, `changes_requested`, or `blocked`; findings remain open evidence until parent calls `delivery_dispose`. Only approved disposed reviews can unblock dependencies and become cleanup-eligible.
+
+After final acceptance:
 
 ```text
 /delivery_cleanup {"runId":"refresh-token"}
 ```
 
-Cleanup rechecks evidence and live Herdr identity, then calls Herdr `worktree remove --force`. Repeated cleanup reports already-cleaned tickets. Branches and `.scratch/` evidence remain.
-
-## Failure behavior
-
-- blocked worker: preserve pane/worktree and report question;
-- failed validation: preserve pane/worktree and log;
-- unknown Herdr state or missing result: block without replay/replacement;
-- parent-process death: no daemon takeover or phase recovery;
-- timeout: block; package does not kill or replace agent automatically;
-- stop: request interrupt, then operator verifies actual state.
+See [operator guide](docs/operator-guide.md) for interruption, reconcile, timeout/fix, metrics, integration, review, cleanup, and publication playbooks.
 
 ## Validation
 
@@ -121,7 +93,7 @@ npm run check
 npm pack --dry-run
 ```
 
-Automated tests use synthetic Herdr fixtures. Release requires one disposable live fixture proving two visible parallel agents, distinct context packets, result collection, validation, dependency handoff, and retained worktrees. Publication needs separate authority.
+Publication always needs separate authority.
 
 ## Documentation
 
@@ -129,7 +101,7 @@ Automated tests use synthetic Herdr fixtures. Release requires one disposable li
 - [Architecture](docs/architecture.md)
 - [Tutorial](docs/tutorial.md)
 - [Ticket contract](docs/ticket-contract.md)
-- [Safety](docs/safety-and-recovery.md)
+- [Safety and recovery](docs/safety-and-recovery.md)
 - [Development](CONTRIBUTING.md)
 
 ## License
