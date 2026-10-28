@@ -5,7 +5,7 @@ import { execFile, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createHash, randomBytes } from "node:crypto";
 import { buildChildEnvironment, createHerdrAdapter } from "./lib/herdr.mjs";
-import { blockedByIntegration, buildContextPacket, parsePorcelainV1Z, readyTickets, validateRunInput, validateTicketResult } from "./lib/scheduler.mjs";
+import { analyzeReconciliation, blockedByIntegration, buildContextPacket, parsePorcelainV1Z, readyTickets, validateRunInput, validateTicketResult } from "./lib/scheduler.mjs";
 
 export const WORKER_MODEL = "9router/cx/gpt-5.6-sol";
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -140,6 +140,26 @@ async function parentSnapshot(root) {
   const head = (await git(root, ["rev-parse", "HEAD"])).trim();
   const status = await git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
   return { head, clean: status.length === 0, statusSha256: digest(status), statusBytes: Buffer.byteLength(status) };
+}
+
+async function reconcileObservations(root, directory, state, herdr) {
+  const response = await herdr.workspaceList();
+  if (!Array.isArray(response?.workspaces)) throw new Error("Herdr workspace state is malformed.");
+  const workspaces = new Map(response.workspaces.map((workspace) => [workspace.workspace_id, workspace]));
+  const liveTickets = {}; const evidenceTickets = {}; const gitTickets = {};
+  for (const [ticketId, ticket] of Object.entries(state.tickets ?? {}).sort(([a], [b]) => a.localeCompare(b))) {
+    const workspace = workspaces.get(ticket.workspace); const recordedPath = ticket.worktreePath;
+    const livePath = workspace?.worktree?.checkout_path;
+    liveTickets[ticketId] = { agentStatus: workspace?.agent_status ?? "unknown", workspacePresent: Boolean(workspace), worktreePresent: Boolean(livePath && fs.existsSync(livePath)), identityMatches: workspace ? Boolean(recordedPath && livePath && path.resolve(livePath) === path.resolve(recordedPath)) : undefined };
+    let validationPassed = ticket.validation?.passed === true && Boolean(ticket.patchEvidence);
+    if (ticket.patchEvidence) try { const metadata = readJson(ticket.patchEvidence.metadataPath); validationPassed &&= metadata.ticketId === ticketId && metadata.sha256 === ticket.patchEvidence.sha256; } catch { validationPassed = false; }
+    evidenceTickets[ticketId] = { validationPassed, integrationVerified: Boolean(ticket.integrationEvidence?.verifiedAt && ticket.integrationEvidence?.integratedSha), reviewVerdict: ticket.verdict ?? ticket.reviewResult?.verdict };
+    const observation = { worktreePresent: Boolean(recordedPath && fs.existsSync(recordedPath)), patchIntegrated: false };
+    if (observation.worktreePresent) try { const tree = await inspectWorkerTree(recordedPath, ticket.patchEvidence?.baseSha ?? state.baseSha, { ownedPaths: [""] }); observation.worktreeHead = tree.head; observation.worktreeStatusSha256 = tree.statusSha256; observation.worktreeStatusBytes = tree.statusBytes; } catch (error) { observation.error = error instanceof Error ? error.message : String(error); }
+    if (ticket.status === "integrated") try { await verifyIntegratedPatch(root, directory, ticketId, ticket); observation.patchIntegrated = true; } catch (error) { observation.integrationError = error instanceof Error ? error.message : String(error); }
+    gitTickets[ticketId] = observation;
+  }
+  return { liveTickets, evidenceTickets, gitTickets, workspaceCount: response.workspaces.length };
 }
 
 async function validateIntegration(root, directory, run, integratedSha) {
@@ -278,6 +298,16 @@ export function createDeliveryWorkflowCore({ herdr = createHerdrAdapter({ env: b
   return Object.freeze({
     async start(repositoryPath, input) { const state = await run(repositoryPath, input, false); return result(`Delivery ${input.runId}: ${state.phase}. ${state.nextAction}`, state, state.phase === "blocked"); },
     async status(repositoryPath, input) { const directory = runDir(repositoryPath, input.runId); if (!fs.existsSync(statePath(directory))) return result(`Run ${input.runId} not found.`, { status: "not_found" }, true); const state = readJson(statePath(directory)); const view = summary(state); const reasons = Object.entries(state.tickets ?? {}).filter(([, ticket]) => ticket.reason).map(([ticketId, ticket]) => `${ticketId}: ${ticket.reason}`); return result(`Delivery ${input.runId}: ${state.phase}. ${view.counts.running} running; ${view.counts.reviewed} reviewed; ${view.counts.disposed} disposed; ${view.counts.validated} validated; ${view.counts.integrated} integrated; ${view.counts.eligible} eligible; ${view.counts.cleaned} cleaned; ${view.counts.retained} retained.${reasons.length ? ` ${reasons.join("; ")}.` : ""} Next: ${view.nextAction}`, { ...state, ...view }); },
+    async reconcile(repositoryPath, input) {
+      const directory = runDir(repositoryPath, input.runId); if (!fs.existsSync(statePath(directory))) return result(`Run ${input.runId} not found.`, { status: "not_found" }, true);
+      const root = fs.realpathSync(repositoryPath); const state = readJson(statePath(directory)); const before = await parentSnapshot(root);
+      let observations; try { observations = await reconcileObservations(root, directory, state, herdr); } catch (error) { return result(error instanceof Error ? error.message : String(error), { status: "blocked", inferredSuccess: false, safeActions: ["inspect_and_retain"] }, true); }
+      const analysis = analyzeReconciliation({ persistedTickets: state.tickets, liveTickets: observations.liveTickets, evidenceTickets: observations.evidenceTickets, gitTickets: observations.gitTickets }); const after = await parentSnapshot(root);
+      const parentUnchanged = before.head === after.head && before.statusSha256 === after.statusSha256 && before.statusBytes === after.statusBytes;
+      const details = { ...analysis, runId: input.runId, phase: state.phase, observations: { workspaceCount: observations.workspaceCount, parentBefore: before, parentAfter: after, parentUnchanged, gitTickets: observations.gitTickets }, safeActions: [...new Set(analysis.tickets.map((ticket) => ticket.recommendation.action))].sort() };
+      if (!parentUnchanged) return result("Reconcile observation changed parent checkout; retain resources and inspect.", details, true);
+      return result(`Delivery ${input.runId}: reconcile observed ${analysis.tickets.length} ticket${analysis.tickets.length === 1 ? "" : "s"}; ${analysis.hasContradictions ? "contradictions require inspection" : "safe actions available"}.`, details, analysis.hasContradictions);
+    },
     async dispose(repositoryPath, input) {
       const directory = runDir(repositoryPath, input.runId); if (active.has(directory)) return result("Run is active; disposition refused.", { status: "active" }, true);
       if (!["approve", "changes_requested", "blocked"].includes(input.disposition)) return result("Disposition must be approve, changes_requested, or blocked.", { status: "blocked" }, true);

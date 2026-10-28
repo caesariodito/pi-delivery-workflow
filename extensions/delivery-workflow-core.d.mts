@@ -10,6 +10,7 @@ export type DeliveryWorkflowCoreOptions = {
 export function createDeliveryWorkflowCore(options?: DeliveryWorkflowCoreOptions): Readonly<{
   start(repositoryPath: string, input: Record<string, unknown>): Promise<ToolResult>;
   status(repositoryPath: string, input: { runId: string }): Promise<ToolResult>;
+  reconcile(repositoryPath: string, input: { runId: string }): Promise<ToolResult>;
   steer(repositoryPath: string, input: { runId: string; ticketId: string; message: string }): Promise<ToolResult>;
   continue(repositoryPath: string, input: { runId: string; integratedSha: string }): Promise<ToolResult>;
   dispose(repositoryPath: string, input: { runId: string; ticketId: string; disposition: "approve" | "changes_requested" | "blocked" }): Promise<ToolResult>;
