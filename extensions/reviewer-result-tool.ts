@@ -35,11 +35,11 @@ export default function deliveryResultTool(pi: ExtensionAPI) {
     residualRisks: Type.Array(Type.String({ minLength: 1, maxLength: 4000 }), { maxItems: 32 }),
     question: Type.Union([Type.Null(), Type.String({ minLength: 1, maxLength: 4000 })]),
   }, { additionalProperties: false });
-  pi.registerTool({
+  const registerResultTool = () => pi.registerTool({
     name: "delivery_result_write",
     label: "Delivery Result",
     description: "Write one nonce-bound ticket result. No arbitrary path is accepted.",
-    parameters: Type.Union([implementationResult, reviewResult]),
+    parameters: pi.getFlag("delivery-result-mode") === "review" ? reviewResult : implementationResult,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     async execute(_toolCallId, input) {
       const configuredPath = pi.getFlag("delivery-result-path"); const configuredNonce = pi.getFlag("delivery-result-nonce"); const bindingDir = pi.getFlag("delivery-result-binding-dir"); const mode = pi.getFlag("delivery-result-mode") ?? "implementation";
@@ -72,4 +72,7 @@ export default function deliveryResultTool(pi: ExtensionAPI) {
       return { content: [{ type: "text", text: "Delivery result saved." }], details: { status: "saved", path: destination } };
     },
   });
+  registerResultTool();
+  // CLI flags arrive after extension loading; refresh before the first model request.
+  pi.on("session_start", registerResultTool);
 }

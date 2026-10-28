@@ -77,7 +77,7 @@ Parent inspects output, manually integrates accepted work, commits, then calls:
 
 Exact persisted patch must reverse-apply at supplied clean HEAD. Optional integration validation runs before downstream launch.
 
-Review verdicts are `approve`, `changes_requested`, or `blocked`; findings remain open evidence until parent calls `delivery_dispose`. Only approved disposed reviews can unblock dependencies and become cleanup-eligible.
+Review verdicts are `approve`, `changes_requested`, or `blocked`; findings remain open evidence until parent calls `delivery_dispose`. Only approved disposed reviews can unblock dependencies and become cleanup-eligible. Parent disposition belongs to the supervisor, not necessarily the human: [triage findings](docs/operator-guide.md#supervisor-triage-policy) within existing authority; ask the human for unresolved uncertainty or expanded authority. This adds no repair rounds or automatic retries.
 
 After final acceptance:
 

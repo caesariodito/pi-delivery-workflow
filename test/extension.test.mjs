@@ -9,7 +9,7 @@ import deliveryResultTool from "../extensions/reviewer-result-tool.ts";
 import { Check } from "typebox/value";
 import { createDeliveryWorkflowCore } from "../extensions/delivery-workflow-core.mjs";
 
-function fakePi() { const tools = new Map(); const commands = new Map(); const flags = new Map(); return { tools, commands, flags, registerTool(tool) { tools.set(tool.name, tool); }, registerCommand(name, command) { commands.set(name, command); }, registerFlag(name) { if (!flags.has(name)) flags.set(name, undefined); }, getFlag(name) { return flags.get(name); }, sendUserMessage() {} }; }
+function fakePi() { const tools = new Map(); const commands = new Map(); const flags = new Map(); const events = new Map(); return { tools, commands, flags, events, on(name, handler) { events.set(name, handler); }, registerTool(tool) { tools.set(tool.name, tool); }, registerCommand(name, command) { commands.set(name, command); }, registerFlag(name) { if (!flags.has(name)) flags.set(name, undefined); }, getFlag(name) { return flags.get(name); }, sendUserMessage() {} }; }
 function repository() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "delivery-repo-"));
   execFileSync("git", ["init", "-q"], { cwd: root }); execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: root }); execFileSync("git", ["config", "user.name", "Test"], { cwd: root });
@@ -51,6 +51,23 @@ test("Phase 3 TypeBox surface enforces integration, context, review, preview, an
   ]) assert.equal(Check(startSchema, changed), false);
   const disposition = pi.tools.get("delivery_dispose").parameters; assert.equal(Check(disposition, { runId: "run", ticketId: "R1", disposition: "approve" }), true); assert.equal(Check(disposition, { runId: "run", ticketId: "R1", disposition: "accepted" }), false); assert.equal(Check(disposition, { runId: "run", disposition: "approve" }), false);
   const output = await pi.tools.get("delivery_preview").execute("id", preview, undefined, undefined, { cwd: fixture.root }); assert.equal(output.details.runId, review.runId); assert.match(output.content[0].text, /Delivery preview/); assert.equal(fs.existsSync(path.join(fixture.root, ".scratch", "delivery")), false);
+});
+
+test("result tool exposes mode-specific object schemas after CLI flags load", async () => {
+  const pi = fakePi(); deliveryResultTool(pi);
+  const implementation = { nonce: "nonce", ticketId: "T1", status: "done", summary: "done", changedPaths: [], validation: "passed", handoff: "done", question: null };
+  const review = { nonce: "nonce", ticketId: "R1", verdict: "approve", summary: "done", findings: [], residualRisks: [], question: null };
+  for (const [mode, valid, wrong] of [["implementation", implementation, review], ["review", review, implementation]]) {
+    pi.flags.set("delivery-result-mode", mode);
+    await pi.events.get("session_start")();
+    const schema = JSON.parse(JSON.stringify(pi.tools.get("delivery_result_write").parameters));
+    assert.equal(schema.type, "object"); assert.equal(schema.anyOf, undefined);
+    assert.equal(schema.additionalProperties, false);
+    assert.deepEqual(schema.required, Object.keys(valid));
+    assert.equal(Check(schema, valid), true); assert.equal(Check(schema, wrong), false);
+    assert.equal(Check(schema, { ...valid, unexpected: true }), false);
+    for (const key of Object.keys(valid)) { const missing = { ...valid }; delete missing[key]; assert.equal(Check(schema, missing), false, key); }
+  }
 });
 
 test("scoped result tool writes ticket result once with byte-compatible implementation output", async () => {

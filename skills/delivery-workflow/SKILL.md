@@ -36,7 +36,7 @@ Call `delivery_start`. Keep Pi alive. Runtime fills free slots, persists each se
 
 Unknown or contradictory state blocks. Retain resources; never replay, replace, infer success, or reload during active/integration/cleanup state. Metrics with `null` and incomplete flags remain unknown, not zero.
 
-Review tickets use empty ownership, explicit read paths, `read` only, zero fixes, and parent-run validation. Git snapshots detect mutation, not sandbox it. Parent inspects verdict/findings and calls `delivery_dispose` with `approve`, `changes_requested`, or `blocked`. Runtime never auto-accepts or auto-fixes review.
+Review tickets use empty ownership, explicit read paths, `read` only, zero fixes, and parent-run validation. Git snapshots detect mutation, not sandbox it. Parent inspects verdict/findings and calls `delivery_dispose` with `approve`, `changes_requested`, or `blocked`. Runtime never auto-accepts or auto-fixes review. For any child or reviewer `changes_requested`, apply the [supervisor triage policy](../../docs/operator-guide.md#supervisor-triage-policy) before asking the human: resolve evidence-backed findings within existing authority, reject unsupported findings with recorded rationale, and escalate uncertainty or actions beyond approval. Parent disposition means supervisor judgment, not mandatory human approval; existing fix budgets and independent review gates remain binding.
 
 ## 5. Integrate
 

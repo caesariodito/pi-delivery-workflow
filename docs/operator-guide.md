@@ -51,7 +51,7 @@ Use after process loss or state doubt. Inspect `contradictions`, `safeActions`, 
 1. Parent runs/provides validation; reviewer receives `read` only plus scoped result writer.
 2. Inspect verdict (`approve`, `changes_requested`, `blocked`), findings, evidence, affected paths, and residual risks.
 3. Verify before/after review and parent Git snapshots. Any mutation or unverifiable state blocks.
-4. Decide every finding; runtime never auto-accepts or auto-fixes.
+4. Supervisor triages every finding using the policy below; runtime never auto-accepts or auto-fixes.
 5. Record decision:
 
 ```text
@@ -59,6 +59,16 @@ Use after process loss or state doubt. Inspect `contradictions`, `safeActions`, 
 ```
 
 Use `changes_requested` or `blocked` when applicable. Only approved disposition lets dependencies proceed and review workspace become cleanup-eligible.
+
+### Supervisor triage policy
+
+The parent supervisor (commander), not the child, owns disposition. A child or reviewer reporting `changes_requested` is evidence to analyze, not an automatic request for human approval.
+
+- **Resolve within authority:** when evidence and reasoning establish a necessary fix, handle it without another human approval only within existing approved scope, ownership, tools/models, validation/review gates, and remaining applicable fix budget. Record the finding, rationale, authority, and validation evidence under `.scratch/<task>/`. After a code fix, run required checks and obtain independent review of the changed code before acceptance.
+- **Reject with evidence:** when a finding is incorrect or unnecessary, record why, citing the relevant requirement, code, or runnable check. Preserve the original verdict/finding. The supervisor may record `approve` only after every finding is resolved or rejected with evidence and all acceptance gates pass; the child cannot approve its own work.
+- **Escalate to human:** ask a focused question when intent remains unclear, evidence conflicts, or material security/data-loss concerns remain unresolved. Obtain renewed approval for scope/architecture expansion, new dependencies, public API breaks, migration/destructive actions, broader ownership, model/execution changes, exhausted fix limits, or other actions outside existing authority. Stop and retain evidence on orchestration/model failure; no fallback or replay.
+
+A finding being small or logically plausible is not sufficient authority. Existing explicit stop conditions still apply. `maxFixRounds` covers eligible validation failures only; a review finding does not create a repair round or authorize a new remediation ticket/run. If review remediation has no approved execution path, request that authority. This policy adds no automatic retry, state reset, or scheduler bypass.
 
 ## Metrics playbook
 
