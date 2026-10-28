@@ -8,6 +8,12 @@ export type ThinTicket = Readonly<{ id: string; mode: TicketMode; goal: string; 
 export type ThinRun = Readonly<{ runId: string; objective: string; baseSha: string; tickets: readonly ThinTicket[]; maxConcurrency: number; contextPaths: readonly string[]; integrationValidation?: IntegrationValidation }>;
 export type ThinTicketState = { status: "pending" | "running" | "reviewed" | "disposed" | "validation_passed" | "integrated" | "cleaned" | "blocked" | "failed" | "stopped"; disposition?: "approve" | "changes_requested" | "blocked"; handoff?: string };
 
+export type ReconcileObservation = Readonly<{ agentStatus?: string; identityMatches?: boolean; workspacePresent?: boolean; worktreePresent?: boolean; validationPassed?: boolean; integrationVerified?: boolean; patchIntegrated?: boolean; reviewVerdict?: "approve" | "changes_requested" | "blocked" }>;
+export type ReconcileContradiction = Readonly<{ code: string; message: string }>;
+export type ReconcileTicketAnalysis = Readonly<{ ticketId: string; persistedStatus: string; liveStatus: string; contradictions: readonly ReconcileContradiction[]; recommendation: Readonly<{ action: "inspect_and_retain" | "verify_patch_then_integrate" | "record_parent_disposition" | "verify_then_cleanup" | "await_scheduler" | "observe_only" | "retain_or_inspect"; mutates: false }> }>;
+export type ReconcileAnalysis = Readonly<{ version: 1; tickets: readonly ReconcileTicketAnalysis[]; hasContradictions: boolean; inferredSuccess: false }>;
+
+export function analyzeReconciliation(input: { persistedTickets?: Record<string, ThinTicketState>; liveTickets?: Record<string, ReconcileObservation>; evidenceTickets?: Record<string, ReconcileObservation>; gitTickets?: Record<string, ReconcileObservation> }): ReconcileAnalysis;
 export function validateTicketGraph(value: unknown): readonly ThinTicket[];
 export function validateRunInput(value: unknown): ThinRun;
 export function readyTickets(tickets: readonly ThinTicket[], states: Record<string, ThinTicketState>): string[];

@@ -113,6 +113,43 @@ function approvedReview(state) { return ["disposed", "cleaned"].includes(state?.
 function validated(state) { return ["validation_passed", "integrated"].includes(state?.status) || (state?.status === "cleaned" && state.disposition === undefined) || approvedReview(state); }
 function integrated(state) { return state?.status === "integrated" || (state?.status === "cleaned" && state.disposition === undefined) || approvedReview(state); }
 
+const RECONCILE_TERMINAL = new Set(["cleaned", "blocked", "failed", "stopped", "timed_out"]);
+const RECONCILE_ACTIVE = new Set(["working", "running"]);
+
+export function analyzeReconciliation({ persistedTickets = {}, liveTickets = {}, evidenceTickets = {}, gitTickets = {} }) {
+  for (const [label, value] of Object.entries({ persistedTickets, liveTickets, evidenceTickets, gitTickets })) if (!value || typeof value !== "object" || Array.isArray(value)) throw new TypeError(`${label} must be an object.`);
+  const ticketIds = [...new Set([...Object.keys(persistedTickets), ...Object.keys(liveTickets), ...Object.keys(evidenceTickets), ...Object.keys(gitTickets)])].sort();
+  const tickets = ticketIds.map((ticketId) => {
+    const persisted = persistedTickets[ticketId]; const live = liveTickets[ticketId]; const evidence = evidenceTickets[ticketId]; const git = gitTickets[ticketId];
+    const status = persisted?.status ?? "pending"; const contradictions = [];
+    const add = (code, message) => contradictions.push(Object.freeze({ code, message }));
+    if (!persisted) add("missing_persisted_ticket", "Observed ticket has no persisted ticket state.");
+    if (status === "running") {
+      if (!live || live.agentStatus === undefined || live.agentStatus === "unknown") add("live_state_unknown", "Persisted running state has no known live agent state.");
+      else if (!RECONCILE_ACTIVE.has(live.agentStatus)) add("running_agent_not_active", `Persisted running state contradicts live agent state ${live.agentStatus}.`);
+    }
+    if (live?.identityMatches === false) add("workspace_identity_mismatch", "Live workspace identity contradicts persisted identity.");
+    if (status === "validation_passed" && evidence?.validationPassed !== true) add("validation_evidence_missing", "Persisted validation-passed state lacks affirmative validation evidence.");
+    if (status === "integrated" && (evidence?.integrationVerified !== true || git?.patchIntegrated !== true)) add("integration_evidence_missing", "Persisted integrated state lacks affirmative evidence and Git confirmation.");
+    if (status === "reviewed" && !["approve", "changes_requested", "blocked"].includes(evidence?.reviewVerdict)) add("review_evidence_missing", "Persisted reviewed state lacks a structured review verdict.");
+    if (status === "cleaned" && (live?.workspacePresent === true || live?.worktreePresent === true || git?.worktreePresent === true)) add("cleaned_resource_present", "Persisted cleaned state contradicts an observed retained resource.");
+    if (live?.agentStatus === "done" && !["validation_passed", "integrated", "cleaned"].includes(status)) add("live_done_not_proof", "Live completion is not proof of validation, integration, or cleanup.");
+    contradictions.sort((a, b) => a.code.localeCompare(b.code) || a.message.localeCompare(b.message));
+    let action = "inspect_and_retain";
+    if (!contradictions.length) {
+      if (status === "validation_passed") action = "verify_patch_then_integrate";
+      else if (status === "reviewed") action = "record_parent_disposition";
+      else if (status === "integrated" || (status === "disposed" && persisted.disposition === "approve")) action = "verify_then_cleanup";
+      else if (status === "pending") action = "await_scheduler";
+      else if (status === "running") action = "observe_only";
+      else if (RECONCILE_TERMINAL.has(status) || status === "disposed") action = "retain_or_inspect";
+      else action = "inspect_and_retain";
+    }
+    return Object.freeze({ ticketId, persistedStatus: status, liveStatus: live?.agentStatus ?? "unknown", contradictions: Object.freeze(contradictions), recommendation: Object.freeze({ action, mutates: false }) });
+  });
+  return Object.freeze({ version: 1, tickets: Object.freeze(tickets), hasContradictions: tickets.some((ticket) => ticket.contradictions.length > 0), inferredSuccess: false });
+}
+
 export function readyTickets(tickets, states) {
   return tickets.filter((ticket) => (states[ticket.id]?.status ?? "pending") === "pending" && ticket.dependencies.every((dependency) => validated(states[dependency])) && (!ticket.requiresIntegratedBase || ticket.dependencies.every((dependency) => integrated(states[dependency])))).map((ticket) => ticket.id);
 }
