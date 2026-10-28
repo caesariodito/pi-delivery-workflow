@@ -82,6 +82,20 @@ test("post-create verification blocks wrong Git base and retains exact evidence"
   } finally { cleanup(f); }
 });
 
+test("post-create verification blocks returned symlink alias before agent start", async () => {
+  const f = fixture(); const expected = path.join(f.worktreeRoot, "safe-run-T1"); const alias = `${expected}-alias`; let agentStarted = false;
+  try {
+    const output = await withHerdr(() => createDeliveryWorkflowCore({ herdr: herdr({
+      async worktreeCreate({ path: worktreePath }) { execFileSync("git", ["worktree", "add", "--detach", worktreePath, f.baseSha], { cwd: f.root }); fs.symlinkSync(worktreePath, alias); return { path: alias, pane: "w1:p1", workspace: "w1" }; },
+      async workspaceList() { return { workspaces: [{ workspace_id: "w1", worktree: { checkout_path: expected } }] }; },
+      async agentStart() { agentStarted = true; assert.fail("returned path alias must block before agent start"); },
+      async worktreeRemove() { assert.fail("aliased resource must be retained"); },
+    }) }).start(f.root, input(f)));
+    assert.equal(agentStarted, false); assert.match(output.details.tickets.T1.reason, /contradictory worktree path; inspect and retain/);
+    assert.equal(output.details.tickets.T1.returnedWorktreePath, alias);
+  } finally { fs.rmSync(alias, { force: true }); cleanup(f); }
+});
+
 test("post-create verification blocks returned-path contradiction without removal", async () => {
   const f = fixture(); const other = fs.mkdtempSync(path.join(os.tmpdir(), "delivery-launch-other-"));
   try {
@@ -152,6 +166,21 @@ test("reconcile rejects coordinated persisted run identity corruption without ch
   try {
     const output = await createDeliveryWorkflowCore({ herdr: herdr({ async workspaceList() { listed = true; return { workspaces: [] }; } }) }).reconcile(f.root, { runId: "safe-run" });
     assert.equal(output.isError, true); assert.equal(listed, false); assert.deepEqual(output.details.safeActions, ["inspect_and_retain"]); assert.match(output.content[0].text, /run identity/i);
+    assert.deepEqual(fs.readFileSync(path.join(directory, "run.json")), beforeRun); assert.deepEqual(fs.readFileSync(path.join(directory, "status.json")), beforeStatus);
+  } finally { cleanup(f); }
+});
+
+for (const operation of ["continue", "dispose", "cleanup"]) test(`${operation} rejects coordinated persisted run identity corruption without changing evidence or Herdr`, async () => {
+  const f = fixture(); const directory = path.join(f.root, ".scratch", "delivery", "safe-run"); fs.mkdirSync(directory, { recursive: true });
+  const run = { version: 2, ...input(f), runId: "other-run", tickets: [{ ...input(f).tickets[0], id: "R1", mode: "review", ownedPaths: [], readPaths: ["spec.md"] }] };
+  const state = { version: 2, runId: "other-run", baseSha: f.baseSha, phase: operation === "continue" ? "awaiting_integration" : operation === "dispose" ? "awaiting_disposition" : "awaiting_cleanup", tickets: { R1: { status: operation === "continue" ? "validation_passed" : operation === "dispose" ? "reviewed" : "disposed", disposition: operation === "cleanup" ? "approve" : undefined } } };
+  fs.writeFileSync(path.join(directory, "run.json"), `${JSON.stringify(run, null, 2)}\n`); fs.writeFileSync(path.join(directory, "status.json"), `${JSON.stringify(state, null, 2)}\n`);
+  const beforeRun = fs.readFileSync(path.join(directory, "run.json")); const beforeStatus = fs.readFileSync(path.join(directory, "status.json")); const calls = [];
+  const herdrCalls = new Proxy({}, { get: (_, name) => async () => { calls.push(name); throw new Error(`unexpected Herdr call: ${String(name)}`); } });
+  try {
+    const core = createDeliveryWorkflowCore({ herdr: herdrCalls });
+    const output = operation === "continue" ? await core.continue(f.root, { runId: "safe-run", integratedSha: f.baseSha }) : operation === "dispose" ? await core.dispose(f.root, { runId: "safe-run", ticketId: "R1", disposition: "approve" }) : await core.cleanup(f.root, { runId: "safe-run" });
+    assert.equal(output.isError, true); assert.equal(output.details.status, "blocked"); assert.deepEqual(output.details.safeActions, ["inspect_and_retain"]); assert.match(output.content[0].text, /run identity/i); assert.deepEqual(calls, []);
     assert.deepEqual(fs.readFileSync(path.join(directory, "run.json")), beforeRun); assert.deepEqual(fs.readFileSync(path.join(directory, "status.json")), beforeStatus);
   } finally { cleanup(f); }
 });
