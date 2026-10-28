@@ -14,12 +14,12 @@ function fixture() {
 }
 function input(f, maxFixRounds = 1) { return { runId: "fix-run", objective: "Repair once", baseSha: f.sha, worktreeRoot: f.worktreeRoot, tickets: [{ id: "T1", goal: "Pass", definitionOfDone: "Validation passes", dependencies: [], ownedPaths: ["a.txt"], worker: { name: "worker", kind: "worker", model: "model", thinking: "medium", tools: ["read", "write"] }, validation: { executable: process.execPath, args: ["-e", "process.exit(require('fs').readFileSync('a.txt','utf8').trim()==='good'?0:1)"] }, specPaths: ["spec.md"], maxFixRounds, timeoutSeconds: 60, validationTimeoutSeconds: 30 }] }; }
 function writeResult(file, status = "done") { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify({ version: 1, ticketId: "T1", status, summary: status, changedPaths: ["a.txt"], validation: status === "done" ? "passed" : "not_run", handoff: "result", question: null }), { flag: "wx" }); }
-function fakeHerdr(f, { repair = true, initialStatus = "done", promptStatus = "done", promptThrows = false, liveAfterPrompt = ["done"] } = {}) {
+function fakeHerdr(f, { repair = true, initialStatus = "done", promptStatus = "done", promptThrows = false, liveAfterPrompt = ["done"], initialExtraFile = null } = {}) {
   let worktree; let bindingDir; let repairStarted = false; let liveIndex = 0; const prompts = []; const waits = [];
   return { prompts, waits,
     async status() {}, async integrationStatus() { return [{ name: "pi", status: "current (v1)" }]; },
     async worktreeCreate({ path: created }) { worktree = created; execFileSync("git", ["worktree", "add", "--detach", created, f.sha], { cwd: f.root, stdio: "ignore" }); return { path: created, pane: "p1", workspace: "w1" }; },
-    async agentStart({ agentArgs }) { assert.equal(agentArgs[agentArgs.indexOf("--model") + 1], "model"); bindingDir = agentArgs[agentArgs.indexOf("--delivery-result-binding-dir") + 1]; fs.writeFileSync(path.join(worktree, "a.txt"), "bad\n"); writeResult(agentArgs[agentArgs.indexOf("--delivery-result-path") + 1], initialStatus); },
+    async agentStart({ agentArgs }) { assert.equal(agentArgs[agentArgs.indexOf("--model") + 1], "model"); bindingDir = agentArgs[agentArgs.indexOf("--delivery-result-binding-dir") + 1]; fs.writeFileSync(path.join(worktree, "a.txt"), "bad\n"); if (initialExtraFile) fs.writeFileSync(path.join(worktree, initialExtraFile), "outside\n"); writeResult(agentArgs[agentArgs.indexOf("--delivery-result-path") + 1], initialStatus); },
     async agentGet() { const status = repairStarted ? liveAfterPrompt[Math.min(liveIndex++, liveAfterPrompt.length - 1)] : "done"; return { agent: { agent_status: status } }; },
     async agentWait({ timeout }) { waits.push(timeout); return { agent: { agent_status: "done" } }; },
     async agentPrompt({ target, prompt, wait }) { prompts.push({ target, prompt, wait }); repairStarted = true; const binding = JSON.parse(fs.readFileSync(path.join(bindingDir, "round-1.json"))); if (repair) fs.writeFileSync(path.join(worktree, "a.txt"), "good\n"); writeResult(binding.resultPath); if (promptThrows) throw new Error("prompt transport timeout"); return { agent: { agent_status: promptStatus } }; },
@@ -58,6 +58,18 @@ test("repair exhaustion fails after one extra prompt", async () => {
 test("blocked agent result is never repaired", async () => {
   const f = fixture(); const herdr = fakeHerdr(f, { initialStatus: "blocked" }); const output = await run(f, herdr);
   assert.equal(output.details.tickets.T1.status, "blocked"); assert.equal(herdr.prompts.length, 0);
+});
+
+test("pre-validation ownership violation executes no validation and no repair", async () => {
+  const f = fixture(); const marker = path.join(f.root, "validation-ran"); const value = input(f); value.tickets[0].validation = { executable: process.execPath, args: ["-e", `require('fs').writeFileSync(${JSON.stringify(marker)},'yes')`] };
+  const herdr = fakeHerdr(f, { initialExtraFile: "outside.txt" }); const output = await run(f, herdr, value);
+  assert.equal(output.details.tickets.T1.status, "blocked"); assert.match(output.details.tickets.T1.reason, /ownership violation before validation/); assert.equal(fs.existsSync(marker), false); assert.equal(herdr.prompts.length, 0);
+});
+
+test("post-validation ownership violation rejects result and starts no repair", async () => {
+  const f = fixture(); const value = input(f); value.tickets[0].validation = { executable: process.execPath, args: ["-e", "require('fs').writeFileSync('outside.txt','bad');process.exit(1)"] };
+  const herdr = fakeHerdr(f); const output = await run(f, herdr, value);
+  assert.equal(output.details.tickets.T1.status, "blocked"); assert.match(output.details.tickets.T1.reason, /ownership violation after validation/); assert.equal(herdr.prompts.length, 0);
 });
 
 test("result tool source keeps legacy flags and fail-closed round scoping", () => {

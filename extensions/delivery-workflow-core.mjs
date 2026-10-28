@@ -22,19 +22,23 @@ function readJson(file, maximum = 256 * 1024) { const stat = fs.lstatSync(file);
 function runDir(repositoryPath, runId) { return path.join(repositoryPath, ".scratch", "delivery", safeId(runId, "runId")); }
 function git(repositoryPath, args, { env = {}, encoding = "utf8", maxBuffer = 2 * 1024 * 1024 } = {}) { return new Promise((resolve, reject) => execFile("git", args, { cwd: repositoryPath, env: { ...buildChildEnvironment(), ...env }, encoding, maxBuffer, timeout: 30_000, shell: false }, (error, stdout, stderr) => error ? reject(new Error(`git ${args.join(" ")} failed: ${String(stderr).trim()}`)) : resolve(stdout))); }
 export function runValidation(spec, worktreePath, timeoutMs) {
+  if (!spec || typeof spec.executable !== "string" || !spec.executable || !Array.isArray(spec.args) || spec.args.some((value) => typeof value !== "string")) throw new TypeError("validation executable and args are invalid.");
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) throw new TypeError("validation timeout must be a positive safe integer.");
   const cwd = fs.realpathSync(path.resolve(worktreePath, spec.cwd ?? ".")); const root = fs.realpathSync(worktreePath);
   if (cwd !== root && !inside(root, cwd)) throw new Error("validation cwd escapes worktree.");
   if (process.platform === "win32") throw new Error("validation process-tree termination is unsupported on win32.");
   const startedAt = performance.now(); const maximum = 2 * 1024 * 1024; const graceMs = 250;
   return new Promise((resolve) => {
-    let stdout = ""; let stderr = ""; let timedOut = false; let outputExceeded = false; let settled = false; let escalation;
+    let stdout = Buffer.alloc(0); let stderr = Buffer.alloc(0); let timedOut = false; let outputExceeded = false; let settled = false; let stopping = false; let closed = false; let escalation; let forcedSettlement;
     const child = spawn(spec.executable, spec.args, { cwd, env: buildChildEnvironment(), detached: true, stdio: ["ignore", "pipe", "pipe"], shell: false });
-    const append = (current, chunk) => { const next = current + chunk; if (Buffer.byteLength(next) > maximum) { outputExceeded = true; terminate("SIGTERM"); return next.slice(0, maximum); } return next; };
-    const terminate = (signal) => { if (!child.pid) return; try { process.kill(-child.pid, signal); } catch (error) { if (error?.code !== "ESRCH") stderr += `${error instanceof Error ? error.message : String(error)}\n`; } };
-    child.stdout.setEncoding("utf8"); child.stderr.setEncoding("utf8"); child.stdout.on("data", (chunk) => { stdout = append(stdout, chunk); }); child.stderr.on("data", (chunk) => { stderr = append(stderr, chunk); });
-    const timeout = setTimeout(() => { timedOut = true; terminate("SIGTERM"); escalation = setTimeout(() => terminate("SIGKILL"), graceMs); }, timeoutMs);
-    child.once("error", (error) => { stderr += error.message; });
-    child.once("close", (code, signal) => { if (settled) return; settled = true; clearTimeout(timeout); clearTimeout(escalation); resolve({ passed: code === 0 && !timedOut && !outputExceeded, timedOut, code: code ?? signal ?? "spawn_error", stdout, stderr, timeoutMs, elapsedMs: Math.max(0, performance.now() - startedAt) }); });
+    const append = (current, chunk) => { const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk); const room = maximum - current.length; if (value.length > room) { outputExceeded = true; stop(); } return room > 0 ? Buffer.concat([current, value.subarray(0, room)]) : current; };
+    const signalGroup = (signal) => { if (!child.pid || closed) return; try { process.kill(-child.pid, signal); } catch (error) { if (error?.code !== "ESRCH") stderr = append(stderr, `${error instanceof Error ? error.message : String(error)}\n`); } };
+    const finish = (code, signal) => { if (settled) return; settled = true; clearTimeout(timeout); clearTimeout(escalation); clearTimeout(forcedSettlement); child.stdout?.destroy(); child.stderr?.destroy(); resolve({ passed: code === 0 && !timedOut && !outputExceeded, timedOut, outputExceeded, code: code ?? signal ?? "spawn_error", stdout: stdout.toString("utf8"), stderr: stderr.toString("utf8"), timeoutMs, elapsedMs: Math.max(0, performance.now() - startedAt) }); };
+    const stop = () => { if (stopping || settled) return; stopping = true; signalGroup("SIGTERM"); escalation = setTimeout(() => { signalGroup("SIGKILL"); forcedSettlement = setTimeout(() => finish(null, "termination_deadline"), graceMs); }, graceMs); };
+    child.stdout.on("data", (chunk) => { stdout = append(stdout, chunk); }); child.stderr.on("data", (chunk) => { stderr = append(stderr, chunk); });
+    const timeout = setTimeout(() => { timedOut = true; stop(); }, timeoutMs);
+    child.once("error", (error) => { stderr = append(stderr, error.message); finish(null, "spawn_error"); });
+    child.once("close", (code, signal) => { closed = true; finish(code, signal); });
   });
 }
 function statePath(directory) { return path.join(directory, "status.json"); }
@@ -92,6 +96,23 @@ async function verifyRepository(repositoryPath, baseSha, worktreeRoot, herdr) {
 }
 
 function owned(ticket, file) { return ticket.ownedPaths.some((claim) => claim.endsWith("/") ? file.startsWith(claim) : file === claim); }
+async function inspectWorkerTree(worktreePath, baseSha, ticket) {
+  const head = (await git(worktreePath, ["rev-parse", "HEAD"])).trim();
+  const changes = parsePorcelainV1Z(await git(worktreePath, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]));
+  return { head, changes, violations: changes.filter((file) => !owned(ticket, file)), valid: head === baseSha && changes.every((file) => owned(ticket, file)) };
+}
+async function reconcileStartupFailure(herdr, target, created, worktreePath) {
+  const evidence = { agent: null, workspace: null, errors: [] };
+  try { evidence.agent = await herdr.agentGet(target); } catch (error) { evidence.errors.push(`agentGet: ${error instanceof Error ? error.message : String(error)}`); }
+  try {
+    const listed = await herdr.workspaceList();
+    if (!Array.isArray(listed?.workspaces)) evidence.errors.push("workspaceList: malformed response");
+    else evidence.workspace = listed.workspaces.find((workspace) => workspace.workspace_id === created.workspace) ?? null;
+  } catch (error) { evidence.errors.push(`workspaceList: ${error instanceof Error ? error.message : String(error)}`); }
+  const livePath = evidence.workspace?.worktree?.checkout_path;
+  evidence.identityMatches = Boolean(evidence.workspace && path.resolve(livePath ?? "") === path.resolve(worktreePath));
+  return evidence;
+}
 function validationFeedback(validation) { const text = `${validation.stdout}${validation.stderr}`; const maximum = 8192; return text.length <= maximum ? text : `${text.slice(0, maximum)}\n[truncated; full output in immutable log]`; }
 function handoff(ticket, runtime, worktreePath, branch, agentResult, validation, changes, patchEvidence) { return { version: 2, ticketId: ticket.id, status: agentResult.status, summary: agentResult.summary, handoff: agentResult.handoff, question: agentResult.question ?? null, branch, workspace: runtime.workspace, pane: runtime.pane, target: runtime.target, worktreePath, changedPaths: changes, validation, patchEvidence, promptPath: runtime.promptPath, resultPath: runtime.resultPath, rounds: runtime.rounds, fixCount: runtime.fixCount, deadlineAt: runtime.deadlineAt, waitElapsedMs: runtime.waitElapsedMs, timing: runtime.timing, createdAt: new Date().toISOString() }; }
 
@@ -139,14 +160,16 @@ export function createDeliveryWorkflowCore({ herdr = createHerdrAdapter({ env: b
     try { await herdr.agentStart({ name: target, kind: ticket.worker.kind, pane: created.pane, timeout: startupRemaining, agentArgs: ["--model", ticket.worker.model, "--thinking", ticket.worker.thinking, "--extension", RESULT_EXTENSION, "--delivery-result-path", currentResultPath, "--delivery-result-nonce", ticketNonce, "--delivery-result-binding-dir", bindingDir, "--tools", tools.join(","), "--", initialPrompt] }); }
     catch (error) {
       evidence.startupElapsedMs = Math.max(0, performance.now() - startupStarted);
-      const message = error instanceof Error ? error.message : String(error); const uncertain = error?.code === "timeout" || Date.now() >= deadlineMs;
-      if (uncertain) return terminal({ status: "blocked", reason: `${message}; agent startup outcome uncertain, workspace retained` });
-      try { await herdr.worktreeRemove({ workspace: created.workspace }); } catch (cleanupError) { return terminal({ status: "blocked", reason: `${message}; pre-agent cleanup failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}` }); }
-      return terminal({ status: "blocked", reason: `${message}; newly created worktree/workspace removed before approval-bound work began` });
+      const message = error instanceof Error ? error.message : String(error); const reconciliation = await reconcileStartupFailure(herdr, target, created, worktreePath);
+      return terminal({ status: "blocked", reason: `${message}; agent startup outcome uncertain, workspace retained`, startupReconciliation: reconciliation });
     }
-    const activity = await waitForInitialActivity(herdr, target, currentResultPath, deadlineMs); evidence.startupElapsedMs = Math.max(0, performance.now() - startupStarted); state.tickets[ticket.id].timing.startupElapsedMs = evidence.startupElapsedMs; save(directory, state);
-    let wait = activity === "timeout" ? { timedOut: true, deadlineMs, elapsedMs: evidence.startupElapsedMs } : await waitForAgentDeadline(herdr, target, deadlineMs);
-    let roundStarted = startupStarted; let agentResult; let validation; let changes;
+    let activity;
+    try { activity = await waitForInitialActivity(herdr, target, currentResultPath, deadlineMs); }
+    catch (error) { evidence.startupElapsedMs = Math.max(0, performance.now() - startupStarted); return terminal({ status: "blocked", reason: `${error instanceof Error ? error.message : String(error)}; startup state unknown, workspace retained` }); }
+    evidence.startupElapsedMs = Math.max(0, performance.now() - startupStarted); state.tickets[ticket.id].timing.startupElapsedMs = evidence.startupElapsedMs; save(directory, state);
+    let roundStarted = performance.now();
+    let wait = activity === "timeout" ? { timedOut: true, deadlineMs, elapsedMs: 0 } : await waitForAgentDeadline(herdr, target, deadlineMs);
+    let agentResult; let validation; let changes;
     while (true) {
       if (wait.timedOut) { evidence.workerElapsedMs += Math.max(0, performance.now() - roundStarted); return terminal({ status: "blocked", reason: "ticket deadline expired; agent and workspace retained", waitElapsedMs: wait.elapsedMs }); }
       let status = wait.status ?? parseAgentState(wait.response);
@@ -159,12 +182,15 @@ export function createDeliveryWorkflowCore({ herdr = createHerdrAdapter({ env: b
       agentResult = validateTicketResult(readJson(currentResultPath, 64 * 1024), ticket.id);
       if (agentResult.status !== "done") return terminal({ status: agentResult.status, reason: agentResult.summary, question: agentResult.question ?? null, handoff: agentResult.handoff ?? "" });
       if (agentResult.validation === "failed") return terminal({ status: "failed", reason: "agent reported failed validation" });
+      const beforeValidation = await inspectWorkerTree(worktreePath, run.baseSha, ticket);
+      if (beforeValidation.head !== run.baseSha) return terminal({ status: "blocked", reason: "worker committed or moved HEAD before validation; validation not executed" });
+      if (beforeValidation.violations.length) return terminal({ status: "blocked", reason: `ownership violation before validation; validation not executed: ${beforeValidation.violations.join(", ")}` });
       validation = await runValidation(ticket.validation, worktreePath, ticket.validationTimeoutSeconds * 1000); evidence.validationElapsedMs += validation.elapsedMs;
       const logPath = path.join(directory, "logs", `${ticket.id}.round-${evidence.fixCount}.log`); fs.mkdirSync(path.dirname(logPath), { recursive: true, mode: 0o700 }); fs.writeFileSync(logPath, `${validation.stdout}${validation.stderr}`, { mode: 0o600, flag: "wx" });
-      const head = (await git(worktreePath, ["rev-parse", "HEAD"])).trim(); if (head !== run.baseSha) return terminal({ status: "blocked", reason: "worker committed or moved HEAD; only working-tree changes are accepted" });
-      changes = parsePorcelainV1Z(await git(worktreePath, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])); const violations = changes.filter((file) => !owned(ticket, file));
-      Object.assign(round, { logPath, validation: { passed: validation.passed, timedOut: validation.timedOut, timeoutMs: validation.timeoutMs, elapsedMs: validation.elapsedMs }, changedPaths: changes });
-      if (violations.length) return terminal({ status: "blocked", reason: `ownership violation: ${violations.join(", ")}` });
+      const afterValidation = await inspectWorkerTree(worktreePath, run.baseSha, ticket); changes = afterValidation.changes;
+      Object.assign(round, { logPath, validation: { passed: validation.passed, timedOut: validation.timedOut, outputExceeded: validation.outputExceeded, timeoutMs: validation.timeoutMs, elapsedMs: validation.elapsedMs }, changedPaths: changes });
+      if (afterValidation.head !== run.baseSha) return terminal({ status: "blocked", reason: "validation moved HEAD; result rejected" });
+      if (afterValidation.violations.length) return terminal({ status: "blocked", reason: `ownership violation after validation; result rejected: ${afterValidation.violations.join(", ")}` });
       if (validation.passed) break;
       if (evidence.fixCount >= ticket.maxFixRounds) return terminal({ status: "failed", reason: validation.timedOut ? "validation deadline expired; fix rounds exhausted" : "validation failed; fix rounds exhausted", validation });
       evidence.fixCount += 1; const fixNonce = nonce(); currentPromptPath = path.join(directory, "prompts", `${ticket.id}.fix-${evidence.fixCount}.md`); currentResultPath = path.join(directory, "results", `${ticket.id}.fix-${evidence.fixCount}.json`);

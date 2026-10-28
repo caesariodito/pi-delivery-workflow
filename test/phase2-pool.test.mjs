@@ -15,12 +15,12 @@ function fixture() {
 }
 function ticket(id, dependencies = [], requiresIntegratedBase = false) { return { id, goal: id, definitionOfDone: "Done", dependencies, ownedPaths: [`${id}.txt`], requiresIntegratedBase, worker: { name: id.toLowerCase(), kind: "worker", model: "model", thinking: "medium", tools: ["read"] }, validation: { executable: "true", args: [] }, specPaths: ["spec.md"] }; }
 function input(f, tickets, maxConcurrency = 2) { return { runId: "pool-run", objective: "Test active pool", baseSha: f.sha, worktreeRoot: f.worktreeRoot, maxConcurrency, tickets }; }
-function fakeHerdr(f, gates, statuses = {}) {
+function fakeHerdr(f, gates, statuses = {}, startupDelayMs = 0) {
   const starts = []; let active = 0; let maximum = 0;
   return { starts, get maximum() { return maximum; },
     async status() {}, async integrationStatus() { return [{ name: "pi", status: "current (v1)" }]; },
     async worktreeCreate({ path: worktreePath }) { execFileSync("git", ["worktree", "add", "--detach", worktreePath, f.sha], { cwd: f.root, stdio: "ignore" }); const id = path.basename(worktreePath).split("-").at(-1); return { path: worktreePath, pane: `pane-${id}`, workspace: `workspace-${id}` }; },
-    async agentStart({ name, agentArgs }) { starts.push(name.toUpperCase()); active += 1; maximum = Math.max(maximum, active); const resultPath = agentArgs[agentArgs.indexOf("--delivery-result-path") + 1]; fs.mkdirSync(path.dirname(resultPath), { recursive: true }); fs.writeFileSync(resultPath, JSON.stringify({ version: 1, ticketId: name.toUpperCase(), status: statuses[name.toUpperCase()] ?? "done", summary: "settled", changedPaths: [], validation: statuses[name.toUpperCase()] === "failed" ? "failed" : "passed", handoff: "done", question: null })); },
+    async agentStart({ name, agentArgs }) { starts.push(name.toUpperCase()); active += 1; maximum = Math.max(maximum, active); if (startupDelayMs) await new Promise((resolve) => setTimeout(resolve, startupDelayMs)); const resultPath = agentArgs[agentArgs.indexOf("--delivery-result-path") + 1]; fs.mkdirSync(path.dirname(resultPath), { recursive: true }); fs.writeFileSync(resultPath, JSON.stringify({ version: 1, ticketId: name.toUpperCase(), status: statuses[name.toUpperCase()] ?? "done", summary: "settled", changedPaths: [], validation: statuses[name.toUpperCase()] === "failed" ? "failed" : "passed", handoff: "done", question: null })); },
     async agentGet(name) { await gates[name.toUpperCase()].promise; active -= 1; return { agent: { agent_status: "done" } }; },
   };
 }
@@ -34,6 +34,12 @@ test("active pool refills immediately, respects cap, and persists lifecycle timi
   gates.T1.resolve(); await until(() => herdr.starts.length === 3); assert.deepEqual(herdr.starts, ["T1", "T2", "T3"]); assert.equal(herdr.maximum, 2);
   gates.T2.resolve(); gates.T3.resolve(); const output = await running; assert.equal(output.details.phase, "awaiting_integration");
   for (const state of Object.values(output.details.tickets)) { assert.ok(state.queuedAt); assert.ok(state.launchStartedAt); assert.ok(state.startedAt); assert.ok(state.settledAt); assert.ok(state.queuedAt <= state.launchStartedAt); assert.ok(state.launchStartedAt <= state.settledAt); assert.ok(state.timing.contextBytes > 0); assert.ok(state.timing.startupElapsedMs >= 0); assert.ok(state.timing.workerElapsedMs >= 0); assert.ok(state.timing.validationElapsedMs >= 0); assert.equal(state.timing.fixCount, 0); }
+}));
+
+test("startup and initial execution durations are non-overlapping", async () => withHerdrEnvironment(async () => {
+  const f = fixture(); const gates = { T1: deferred() }; const herdr = fakeHerdr(f, gates, {}, 80); const running = createDeliveryWorkflowCore({ herdr }).start(f.root, input(f, [ticket("T1")], 1));
+  await until(() => herdr.starts.length === 1); await new Promise((resolve) => setTimeout(resolve, 100)); gates.T1.resolve(); const output = await running; const timing = output.details.tickets.T1.timing; const round = output.details.tickets.T1.rounds[0];
+  assert.ok(timing.startupElapsedMs >= 60, `${timing.startupElapsedMs}`); assert.ok(round.executionElapsedMs < timing.startupElapsedMs, `${round.executionElapsedMs} overlaps ${timing.startupElapsedMs}`); assert.ok(timing.workerElapsedMs < timing.startupElapsedMs);
 }));
 
 test("failure stops new launches but drains active tickets", async () => withHerdrEnvironment(async () => {

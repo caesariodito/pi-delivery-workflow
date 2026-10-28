@@ -50,3 +50,27 @@ test("validation timeout terminates descendant process group", { skip: process.p
   assert.equal(result.timedOut, true); assert.ok(Date.now() - started < 1500); const childPid = Number(fs.readFileSync(pidFile, "utf8"));
   await new Promise((resolve) => setTimeout(resolve, 50)); assert.throws(() => process.kill(childPid, 0), (error) => error?.code === "ESRCH");
 });
+
+test("validation output overflow escalates and settles with bounded output", { skip: process.platform === "win32" }, async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "delivery-validation-output-"));
+  const script = `process.on('SIGTERM',()=>{});const block='x'.repeat(65536);setInterval(()=>process.stdout.write(block),0)`;
+  const started = Date.now(); const result = await runValidation({ executable: process.execPath, args: ["-e", script] }, root, 10_000);
+  assert.equal(result.passed, false); assert.equal(result.outputExceeded, true); assert.equal(result.timedOut, false); assert.ok(Buffer.byteLength(result.stdout) <= 2 * 1024 * 1024); assert.ok(Date.now() - started < 1500);
+});
+
+test("validation settles when escaped descendant keeps inherited output pipe open", { skip: process.platform === "win32" }, async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "delivery-validation-escaped-")); const pidFile = path.join(root, "escaped.pid");
+  const childScript = `process.on('SIGTERM',()=>{});setInterval(()=>{},1000)`;
+  const script = `const {spawn}=require('node:child_process');const fs=require('node:fs');const c=spawn(process.execPath,['-e',${JSON.stringify(childScript)}],{detached:true,stdio:['ignore','inherit','inherit']});fs.writeFileSync(${JSON.stringify(pidFile)},String(c.pid));setInterval(()=>{},1000)`;
+  let escapedPid;
+  try {
+    const started = Date.now(); const result = await runValidation({ executable: process.execPath, args: ["-e", script] }, root, 40); escapedPid = Number(fs.readFileSync(pidFile, "utf8"));
+    assert.equal(result.timedOut, true); assert.equal(result.passed, false); assert.ok(Date.now() - started < 1500); assert.doesNotThrow(() => process.kill(escapedPid, 0));
+  } finally { if (escapedPid) { try { process.kill(-escapedPid, "SIGKILL"); } catch {} } }
+});
+
+test("validation rejects unsafe timeout and argv inputs", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "delivery-validation-input-"));
+  assert.throws(() => runValidation({ executable: process.execPath, args: [] }, root, 0), /positive safe integer/);
+  assert.throws(() => runValidation({ executable: process.execPath, args: [1] }, root, 100), /executable and args/);
+});
