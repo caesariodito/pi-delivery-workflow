@@ -38,6 +38,12 @@ Validation has separate bounded timeout. One explicitly approved repair round ma
 
 Review worker receives `read` only plus scoped result writer. Runtime snapshots review worktree and parent checkout before/after. This detects mutation; it does not prevent OS access. Mutation or unverifiable snapshots block. Verdict never equals parent acceptance; `delivery_dispose` records explicit parent decision.
 
+## Context staging
+
+Only approved context/spec file union crosses into verified child checkout; no recursive copy. Component checks reject symlinks and escapes; bounded no-follow reads, private exclusive writes, collision checks and post-copy digests prevent detectable unsafe staging. Tracked context is never rewritten; copied ignored context remains out of status and patch evidence. Staging failure retains workspace and any partial private files without starting agent or validation. Staged-context mutation blocks instead of creating a fix round.
+
+No approval-time content hash exists: parent must preserve approved source docs before execution. String-path APIs cannot eliminate hostile same-user ancestor swaps or changes between verification and agent read. Read scope is declared authority, not an OS sandbox. Source edits do not change loaded runtime; activation remains a separate safe-lifecycle decision, never an implicit reload.
+
 ## Retention and notification
 
 Validation-passed, reviewed, blocked, failed, stopped, timed-out, running, unknown, mismatched, and legacy work retains resources. Best-effort notification follows persisted failure/block state; notification failure cannot replace root outcome.

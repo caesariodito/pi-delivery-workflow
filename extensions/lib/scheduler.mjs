@@ -256,6 +256,10 @@ export function unweightedCriticalPath(tickets) {
 }
 
 export function previewTicketGraph(run) {
+  if (run.contextPaths.length > 32 || run.tickets.some((ticket) => ticket.specPaths.length > 32)) throw new TypeError("contextPaths/specPaths must contain 0-32 paths.");
+  for (const ticket of run.tickets) if (ticket.mode === "review") {
+    for (const file of [...run.contextPaths, ...ticket.specPaths]) if (!ticket.readPaths.some((claim) => claim === file || (claim.endsWith("/") && file.startsWith(claim)))) throw new TypeError(`${ticket.id}.readPaths must cover context: ${file}`);
+  }
   const tickets = [...run.tickets].sort((a, b) => a.id.localeCompare(b.id));
   const nodes = tickets.map((ticket) => Object.freeze({
     id: ticket.id,
@@ -359,7 +363,7 @@ export function buildContextPacket({ run, ticket, repositoryPath, worktreePath, 
     "", ticket.mode === "review" ? "## Read scope" : "## Ownership", ...(ticket.mode === "review" ? ticket.readPaths : ticket.ownedPaths).map((item) => `- \`${item}\``), `- Forbidden: ${ticket.forbiddenScope}`,
     "", "## Dependencies", ...(ticket.dependencies.length ? ticket.dependencies.map((item) => `- ${item}`) : ["- None"]),
     "", "## Dependency handoffs", ...(dependencyHandoffs.length ? dependencyHandoffs.map((item) => `- **${item.ticketId}:** ${item.handoff}`) : ["- None"]),
-    "", "## Source documents", ...[...run.contextPaths, ...ticket.specPaths].map((item) => `- \`${item}\``),
+    "", "## Source documents", "Read-only inputs at these relative paths in assigned worktree; parent repository is not a fallback.", ...[...new Set([...run.contextPaths, ...ticket.specPaths])].map((item) => `- \`${item}\``),
     "", "## Validation", ...(ticket.mode === "review" ? ["- Parent-run only; reviewer must not execute validation."] : []), `- Executable: \`${ticket.validation.executable}\``, `- Args: ${JSON.stringify(ticket.validation.args)}`, `- Cwd: \`${ticket.validation.cwd ?? "."}\``,
     ...(run.integrationValidation ? ["", "## Integration validation", `- Executable: \`${run.integrationValidation.executable}\``, `- Args: ${JSON.stringify(run.integrationValidation.args)}`, `- Cwd: \`${run.integrationValidation.cwd ?? "."}\``, `- Timeout seconds: ${run.integrationValidation.timeoutSeconds}`] : []),
     "", "## Agent contract", `- Model: \`${ticket.worker.model}\``, `- Thinking: \`${ticket.worker.thinking}\``, `- Tools: ${ticket.worker.tools.map((item) => `\`${item}\``).join(", ")}`,

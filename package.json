@@ -1,6 +1,6 @@
 {
   "name": "pi-delivery-workflow",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Reviewed spec-to-ticket delivery workflow for Pi, powered by Herdr",
   "type": "module",
   "license": "MIT",

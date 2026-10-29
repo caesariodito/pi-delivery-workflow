@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { createHash, randomBytes } from "node:crypto";
 import { buildChildEnvironment, createHerdrAdapter } from "./lib/herdr.mjs";
 import { resolveWorktreeRoot } from "./lib/worktree-root.mjs";
-import { analyzeReconciliation, analyzeRunMetrics, blockedByIntegration, buildContextPacket, parsePorcelainV1Z, readyTickets, validateRunInput, validateTicketResult } from "./lib/scheduler.mjs";
+import { analyzeReconciliation, analyzeRunMetrics, blockedByIntegration, buildContextPacket, parsePorcelainV1Z, readyTickets, previewTicketGraph, validateRunInput, validateTicketResult } from "./lib/scheduler.mjs";
 
 export const WORKER_MODEL = "9router/cx/gpt-5.6-sol";
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -47,6 +47,80 @@ function statePath(directory) { return path.join(directory, "status.json"); }
 function validatePersistedRunIdentity(runId, savedRun, state) { if (runId !== savedRun.runId || runId !== state.runId) throw new Error("Persisted run identity does not match requested run identity; inspect and retain resources."); }
 function save(directory, state) { state.updatedAt = new Date().toISOString(); atomicJson(statePath(directory), state); return state; }
 function contextFilesExist(repositoryPath, paths) { for (const item of paths) { const resolved = path.resolve(repositoryPath, item); const stat = fs.lstatSync(resolved); if (!inside(repositoryPath, resolved) || !stat.isFile() || stat.isSymbolicLink() || stat.size > 256 * 1024) throw new Error(`context file is unavailable: ${item}`); } }
+// ponytail: string paths cannot prevent hostile same-user ancestor swaps; use an OS sandbox for adversarial isolation.
+function contextPath(root, file, createParents = false) {
+  if (typeof file !== "string" || !file || file.includes("\0") || file.includes("\\") || /^[A-Za-z]:/.test(file) || path.isAbsolute(file) || file.endsWith("/") || file.split("/").some((part) => !part || part === "." || part === ".." || part.toLowerCase() === ".git")) throw new Error(`unsafe context path: ${file}`);
+  let current = root;
+  const parts = file.split("/");
+  for (const [index, part] of parts.entries()) {
+    current = path.join(current, part);
+    let stat;
+    try { stat = fs.lstatSync(current); } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+      if (!createParents) return path.join(root, file);
+      if (index === parts.length - 1) return current;
+      fs.mkdirSync(current, { mode: 0o700 }); stat = fs.lstatSync(current);
+    }
+    if (stat.isSymbolicLink() || (index < parts.length - 1 ? !stat.isDirectory() : !stat.isFile()) || !inside(root, fs.realpathSync(current))) throw new Error(`unsafe context component: ${file}`);
+  }
+  return current;
+}
+function contextBytes(root, file) {
+  const resolved = contextPath(root, file);
+  if (!fs.constants.O_NOFOLLOW) throw new Error("context no-follow reads unsupported");
+  const fd = fs.openSync(resolved, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  try {
+    const before = fs.fstatSync(fd);
+    if (!before.isFile() || before.nlink !== 1 || before.size > 262144) throw new Error(`context exceeds regular-file/link/byte limit: ${file}`);
+    const buffer = Buffer.alloc(262145); let length = 0; let count;
+    while (length < buffer.length && (count = fs.readSync(fd, buffer, length, buffer.length - length, null))) length += count;
+    const after = fs.fstatSync(fd); const named = fs.lstatSync(contextPath(root, file));
+    if (length > 262144 || length !== before.size || after.size !== before.size || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs || named.dev !== before.dev || named.ino !== before.ino) throw new Error(`context changed during read: ${file}`);
+    return buffer.subarray(0, length);
+  } finally { fs.closeSync(fd); }
+}
+async function contextTracked(root, file) {
+  const entries = (await git(root, ["ls-files", "--stage", "-z", "--", `:(literal)${file}`])).split("\0").filter(Boolean);
+  if (!entries.length) return false;
+  if (entries.length !== 1 || !/^(100644|100755) [0-9a-f]+ 0\t/.test(entries[0])) throw new Error(`unsupported tracked context: ${file}`);
+  return true;
+}
+async function stageContext(repositoryPath, worktreePath, run, ticket) {
+  const files = [...new Set([...run.contextPaths, ...ticket.specPaths])];
+  if (run.contextPaths.length > 32 || ticket.specPaths.length > 32) throw new Error("contextPaths/specPaths exceed 32 paths");
+  const aliases = files.map((file) => file.toLowerCase().normalize("NFC"));
+  if (new Set(aliases).size !== files.length) throw new Error("context path aliases collide");
+  const records = [];
+  for (const file of files) {
+    contextPath(repositoryPath, file); contextPath(worktreePath, file);
+    const evidence = `.scratch/delivery/${run.runId}`;
+    if (file === evidence || file.startsWith(`${evidence}/`) || files.some((other) => other !== file && other.startsWith(`${file}/`)) || ticket.ownedPaths.some((claim) => claim === file || (claim.endsWith("/") && file.startsWith(claim)) || claim.startsWith(`${file}/`))) throw new Error(`context overlaps evidence or ownership: ${file}`);
+    const bytes = contextBytes(repositoryPath, file);
+    const tracked = await contextTracked(repositoryPath, file);
+    if (tracked !== await contextTracked(worktreePath, file)) throw new Error(`context tracking mismatch: ${file}`);
+    if (tracked) await git(repositoryPath, ["diff", "--quiet", run.baseSha, "--", `:(literal)${file}`]);
+    else for (const root of [repositoryPath, worktreePath]) await git(root, ["check-ignore", "-q", "--", file]);
+    const destination = path.join(worktreePath, file);
+    if (fs.existsSync(destination)) {
+      if (fs.lstatSync(destination).nlink !== 1 || !contextBytes(worktreePath, file).equals(bytes)) throw new Error(`context collision or unsupported checkout filter: ${file}`);
+    } else if (tracked) throw new Error(`tracked context missing: ${file}`);
+    records.push({ file, bytes, tracked });
+  }
+  for (const record of records) {
+    const destination = contextPath(worktreePath, record.file, true);
+    if (!fs.existsSync(destination)) fs.writeFileSync(destination, record.bytes, { flag: "wx", mode: 0o600 });
+    record.sha256 = digest(record.bytes); delete record.bytes;
+  }
+  await verifyContext(worktreePath, records);
+  if ((await git(worktreePath, ["rev-parse", "HEAD"])).trim() !== run.baseSha || (await git(worktreePath, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])).length) throw new Error("context staging changed immutable base or clean checkout");
+  return records;
+}
+async function verifyContext(root, records) {
+  for (const record of records) {
+    if (digest(contextBytes(root, record.file)) !== record.sha256 || fs.lstatSync(path.join(root, record.file)).nlink !== 1 || await contextTracked(root, record.file) !== record.tracked) throw new Error(`staged context mutated: ${record.file}`);
+    if (!record.tracked) await git(root, ["check-ignore", "-q", "--", record.file]);
+  }
+}
 function parseAgentState(value) { return value?.agent?.agent_status ?? value?.agent?.status ?? value?.agent?.state ?? value?.event?.agent_status ?? value?.status ?? value?.state ?? "unknown"; }
 function digest(value) { return createHash("sha256").update(value).digest("hex"); }
 function patchPaths(directory, ticketId) { return { patch: path.join(directory, "patches", `${safeId(ticketId, "ticketId")}.patch`), metadata: path.join(directory, "patches", `${ticketId}.json`) }; }
@@ -240,9 +314,11 @@ export function createDeliveryWorkflowCore({ herdr = createHerdrAdapter({ env: b
     if (expectedReal !== returnedReal || !inside(rootCheck.worktreeRoot, expectedReal)) throw new Error("Herdr returned a contradictory worktree path; inspect and retain resources.");
     const top = fs.realpathSync((await git(expectedReal, ["rev-parse", "--show-toplevel"])).trim()); const head = (await git(expectedReal, ["rev-parse", "HEAD"])).trim();
     if (top !== expectedReal || head !== run.baseSha) throw new Error("created worktree Git identity or base SHA is contradictory; inspect and retain resources.");
+    const stagedContext = await stageContext(repositoryPath, worktreePath, run, ticket);
+    const inspectContextTree = async () => { await verifyContext(worktreePath, stagedContext); return inspectWorkerTree(worktreePath, run.baseSha, ticket); };
     let reviewBefore = null;
     if (ticket.mode === "review") {
-      try { reviewBefore = { parent: await parentSnapshot(repositoryPath), worktree: await inspectWorkerTree(worktreePath, run.baseSha, ticket) }; }
+      try { reviewBefore = { parent: await parentSnapshot(repositoryPath), worktree: await inspectContextTree() }; }
       catch (error) { return terminal({ mode: "review", status: "blocked", reason: `review state unverifiable before launch: ${error instanceof Error ? error.message : String(error)}; workspace retained` }); }
       if (!reviewBefore.parent.clean || reviewBefore.parent.head !== run.baseSha || reviewBefore.worktree.head !== run.baseSha || reviewBefore.worktree.changes.length) return terminal({ mode: "review", status: "blocked", reason: "review snapshots are not clean at immutable base; workspace retained", reviewEvidence: { before: reviewBefore } });
     }
@@ -281,7 +357,7 @@ export function createDeliveryWorkflowCore({ herdr = createHerdrAdapter({ env: b
       agentResult = validateTicketResult(readJson(currentResultPath, 64 * 1024), ticket.id, ticket.mode);
       if (ticket.mode === "review") {
         let reviewAfter;
-        try { reviewAfter = { parent: await parentSnapshot(repositoryPath), worktree: await inspectWorkerTree(worktreePath, run.baseSha, ticket) }; }
+        try { reviewAfter = { parent: await parentSnapshot(repositoryPath), worktree: await inspectContextTree() }; }
         catch (error) { return terminal({ mode: "review", status: "blocked", reason: `review state unverifiable: ${error instanceof Error ? error.message : String(error)}`, verdict: "blocked", reviewResult: agentResult, reviewEvidence: { before: reviewBefore } }); }
         const parentUnchanged = reviewAfter.parent.head === reviewBefore.parent.head && reviewAfter.parent.clean === reviewBefore.parent.clean && reviewAfter.parent.statusSha256 === reviewBefore.parent.statusSha256 && reviewAfter.parent.statusBytes === reviewBefore.parent.statusBytes;
         const worktreeUnchanged = reviewAfter.worktree.head === reviewBefore.worktree.head && reviewAfter.worktree.statusSha256 === reviewBefore.worktree.statusSha256 && reviewAfter.worktree.statusBytes === reviewBefore.worktree.statusBytes && reviewAfter.worktree.changes.length === 0;
@@ -291,12 +367,12 @@ export function createDeliveryWorkflowCore({ herdr = createHerdrAdapter({ env: b
       }
       if (agentResult.status !== "done") return terminal({ status: agentResult.status, reason: agentResult.summary, question: agentResult.question ?? null, handoff: agentResult.handoff ?? "" });
       if (agentResult.validation === "failed") return terminal({ status: "failed", reason: "agent reported failed validation" });
-      const beforeValidation = await inspectWorkerTree(worktreePath, run.baseSha, ticket);
+      const beforeValidation = await inspectContextTree();
       if (beforeValidation.head !== run.baseSha) return terminal({ status: "blocked", reason: "worker committed or moved HEAD before validation; validation not executed" });
       if (beforeValidation.violations.length) return terminal({ status: "blocked", reason: `ownership violation before validation; validation not executed: ${beforeValidation.violations.join(", ")}` });
       validation = await runValidation(ticket.validation, worktreePath, ticket.validationTimeoutSeconds * 1000); evidence.validationElapsedMs += validation.elapsedMs;
       const logPath = path.join(directory, "logs", `${ticket.id}.round-${evidence.fixCount}.log`); fs.mkdirSync(path.dirname(logPath), { recursive: true, mode: 0o700 }); fs.writeFileSync(logPath, `${validation.stdout}${validation.stderr}`, { mode: 0o600, flag: "wx" });
-      const afterValidation = await inspectWorkerTree(worktreePath, run.baseSha, ticket); changes = afterValidation.changes;
+      const afterValidation = await inspectContextTree(); changes = afterValidation.changes;
       Object.assign(round, { logPath, validation: { passed: validation.passed, timedOut: validation.timedOut, outputExceeded: validation.outputExceeded, timeoutMs: validation.timeoutMs, elapsedMs: validation.elapsedMs }, changedPaths: changes });
       if (afterValidation.head !== run.baseSha) return terminal({ status: "blocked", reason: "validation moved HEAD; result rejected" });
       if (afterValidation.violations.length) return terminal({ status: "blocked", reason: `ownership violation after validation; result rejected: ${afterValidation.violations.join(", ")}` });
@@ -320,7 +396,8 @@ export function createDeliveryWorkflowCore({ herdr = createHerdrAdapter({ env: b
 
   async function run(repositoryPath, input, existing = false) {
     const repositoryRoot = fs.realpathSync(repositoryPath); const rootResolution = existing ? persistedWorktreeRoot(repositoryRoot, input) : resolveWorktreeRoot(repositoryRoot, input.worktreeRoot);
-    const run = { ...validateRunInput({ ...input, worktreeRoot: rootResolution.worktreeRoot }), worktreeRoot: rootResolution.worktreeRoot, worktreeRootProvenance: rootResolution.provenance }; const root = await verifyRepository(repositoryRoot, run.baseSha, rootResolution.worktreeRoot, herdr); contextFilesExist(root, run.contextPaths);
+    const run = { ...validateRunInput({ ...input, worktreeRoot: rootResolution.worktreeRoot }), worktreeRoot: rootResolution.worktreeRoot, worktreeRootProvenance: rootResolution.provenance }; if (!existing) previewTicketGraph(run);
+    const root = await verifyRepository(repositoryRoot, run.baseSha, rootResolution.worktreeRoot, herdr); contextFilesExist(root, run.contextPaths);
     const directory = runDir(root, run.runId); if (!existing) { fs.mkdirSync(path.dirname(directory), { recursive: true, mode: 0o700 }); fs.mkdirSync(directory, { recursive: false, mode: 0o700 }); atomicJson(path.join(directory, "run.json"), { ...run, version: 2, createdAt: new Date().toISOString() }); }
     const queuedAt = new Date().toISOString();
     const state = existing ? readJson(statePath(directory)) : { version: 2, runId: run.runId, baseSha: run.baseSha, phase: "running", tickets: Object.fromEntries(run.tickets.map((ticket) => [ticket.id, { status: "pending", queuedAt }])), guidance: {}, updatedAt: queuedAt };

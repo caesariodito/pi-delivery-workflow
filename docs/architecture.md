@@ -29,7 +29,7 @@ No package daemon exists. Package does not reproduce mission takeover, automatic
 ## Execution
 
 1. Verify clean parent checkout, exact base SHA, paths, ownership, and graph. Resolve omitted root to canonical `~/.pi/delivery-worktrees/v1/<repo-slug>-<repo-id>` or validate explicit override; persist canonical root and provenance before launch.
-2. Create visible worktree/pane from persisted root evidence and start exact approved model/tools.
+2. Create and verify visible worktree/pane from persisted root evidence. Stage approved context/spec files at identical relative paths before review baseline and exact-model startup. Reuse tracked files without writes; copy only ignored files exclusively after checking the complete staging plan. Verify staged bytes and Git cleanliness, then check context integrity alongside worker/review inspections.
 3. Wait in slices no longer than 300 seconds until settlement or ticket deadline.
 4. Reconcile wait errors with live agent state. Known-active state may wait again while deadline remains; unknown state blocks.
 5. Read nonce-bound result. For implementation, run validation with its own timeout.

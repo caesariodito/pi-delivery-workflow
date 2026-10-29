@@ -80,7 +80,8 @@ Integration timeout bound is `30..1800` seconds.
 - Implementation ownership does not overlap.
 - Commands are executable plus argv, never shell text.
 - `kind` accepts `pi`, `worker`, or `reviewer`; aliases launch through Herdr kind `pi`.
-- `contextPaths` exist at launch. `specPaths` are checked when ticket becomes ready.
+- `contextPaths` exist at launch. `specPaths` are checked when ticket becomes ready. Each array supports at most 32 regular files of at most 256 KiB each. Before startup, their first-seen deduplicated union is made available byte-identically at the same child-relative paths. Tracked inputs are verified without writes; untracked inputs must be ignored in both checkouts. Nonidentical collisions, symlinks (including ancestors), unsafe paths, current-run evidence paths and current-ticket ownership overlaps block; no overwrite or ignore-rule changes occur.
+- New previews/start requests require every review context file to be explicitly covered by `readPaths`. Persisted continuation/disposition keeps its approved graph rules; per-ticket staging safety still applies and blocks with retained evidence. Staged files are read-only inputs; ignored mutations are checked at existing worker/review inspection boundaries. Different checkout-filter bytes are unsupported and block.
 - `requiresIntegratedBase: true` waits for exact integration. `false` permits textual handoff after validation.
 - Optional context fields are arrays: `observableBehavior`, `acceptanceExamples`, `nonGoals`, `entryPoints`, `invariants`, `expectedValidation`, `unresolvedDecisions`.
 
