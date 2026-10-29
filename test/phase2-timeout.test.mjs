@@ -46,7 +46,8 @@ test("validation has explicit timeout and elapsed evidence", async () => {
 test("validation timeout terminates descendant process group", { skip: process.platform === "win32" }, async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "delivery-validation-tree-")); const pidFile = path.join(root, "child.pid");
   const script = `const {spawn}=require('node:child_process');const fs=require('node:fs');const c=spawn(process.execPath,['-e',\"process.on('SIGTERM',()=>{});setInterval(()=>{},1000)\"],{stdio:['ignore','inherit','inherit']});fs.writeFileSync(${JSON.stringify(pidFile)},String(c.pid));setInterval(()=>{},1000)`;
-  const started = Date.now(); const result = await runValidation({ executable: process.execPath, args: ["-e", script] }, root, 40);
+  // Allow process startup under parallel test load before exercising termination.
+  const started = Date.now(); const result = await runValidation({ executable: process.execPath, args: ["-e", script] }, root, 500);
   assert.equal(result.timedOut, true); assert.ok(Date.now() - started < 1500); const childPid = Number(fs.readFileSync(pidFile, "utf8"));
   await new Promise((resolve) => setTimeout(resolve, 50)); assert.throws(() => process.kill(childPid, 0), (error) => error?.code === "ESRCH");
 });
@@ -64,7 +65,7 @@ test("validation settles when escaped descendant keeps inherited output pipe ope
   const script = `const {spawn}=require('node:child_process');const fs=require('node:fs');const c=spawn(process.execPath,['-e',${JSON.stringify(childScript)}],{detached:true,stdio:['ignore','inherit','inherit']});fs.writeFileSync(${JSON.stringify(pidFile)},String(c.pid));setInterval(()=>{},1000)`;
   let escapedPid;
   try {
-    const started = Date.now(); const result = await runValidation({ executable: process.execPath, args: ["-e", script] }, root, 40); escapedPid = Number(fs.readFileSync(pidFile, "utf8"));
+    const started = Date.now(); const result = await runValidation({ executable: process.execPath, args: ["-e", script] }, root, 500); escapedPid = Number(fs.readFileSync(pidFile, "utf8"));
     assert.equal(result.timedOut, true); assert.equal(result.passed, false); assert.ok(Date.now() - started < 1500); assert.doesNotThrow(() => process.kill(escapedPid, 0));
   } finally { if (escapedPid) { try { process.kill(-escapedPid, "SIGKILL"); } catch {} } }
 });
@@ -73,4 +74,16 @@ test("validation rejects unsafe timeout and argv inputs", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "delivery-validation-input-"));
   assert.throws(() => runValidation({ executable: process.execPath, args: [] }, root, 0), /positive safe integer/);
   assert.throws(() => runValidation({ executable: process.execPath, args: [1] }, root, 100), /executable and args/);
+});
+
+
+test("validation cancellation terminates bounded process and pre-abort launches nothing", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "delivery-validation-abort-"));
+  try {
+    const before = new AbortController(); before.abort();
+    await assert.rejects(runValidation({ executable: process.execPath, args: ["-e", "process.exit(0)"] }, root, 1000, { signal: before.signal }), /aborted before launch/);
+    const controller = new AbortController();
+    const pending = runValidation({ executable: process.execPath, args: ["-e", "setInterval(()=>{},1000)"] }, root, 10000, { signal: controller.signal });
+    controller.abort(); const result = await pending; assert.equal(result.passed, false); assert.equal(result.timedOut, true);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

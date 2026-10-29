@@ -1,0 +1,6 @@
+import { createHash } from "node:crypto";
+
+export function contract(repositoryPath = "/repo") {
+  const actor = (model, tools) => ({ model, thinking: "medium", tools });
+  return { version: 1, runId: "run-1", repositoryPath, baseSha: "a".repeat(40), objective: "Bounded implementation", criteria: [{ id: "A1", condition: "Required check passes and reviewer finds no unresolved defects" }], context: [{ path: "plan.md", sha256: createHash("sha256").update("approved\n").digest("hex") }], steps: [{ id: "S1", goal: "Change feature", ownedPaths: ["src/", "test/"], dependsOn: [], criteria: ["A1"] }], actors: { supervisor: actor("supervisor", ["read"]), writer: actor("writer", ["read", "write", "edit", "bash"]), reviewer: actor("reviewer", ["read"]) }, permissions: { candidateCommits: true, interrupt: true, parentWrites: false, publication: false, cleanup: false }, limits: { wallTimeSeconds: 14400, maxRemediationRounds: 3, maxNoProgressAttempts: 2, maxSteps: 1, maxActorLaunches: 8 }, validation: [{ id: "check", executable: "node", args: ["--test", "test/feature.test.mjs"], cwd: ".", timeoutSeconds: 300, criteria: ["A1"] }], reviewPolicy: { freshContext: true, evidenceRequired: true, unresolvedFindingsBlock: true } };
+}

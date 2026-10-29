@@ -23,7 +23,8 @@ function exclusiveJson(file, value) { fs.mkdirSync(path.dirname(file), { recursi
 function readJson(file, maximum = 256 * 1024) { const stat = fs.lstatSync(file); if (!stat.isFile() || stat.isSymbolicLink() || stat.size > maximum) throw new Error("inspection file is invalid."); return JSON.parse(fs.readFileSync(file, "utf8")); }
 function runDir(repositoryPath, runId) { return path.join(repositoryPath, ".scratch", "delivery", safeId(runId, "runId")); }
 function git(repositoryPath, args, { env = {}, encoding = "utf8", maxBuffer = 2 * 1024 * 1024 } = {}) { return new Promise((resolve, reject) => execFile("git", args, { cwd: repositoryPath, env: { ...buildChildEnvironment(), ...env }, encoding, maxBuffer, timeout: 30_000, shell: false }, (error, stdout, stderr) => error ? reject(new Error(`git ${args.join(" ")} failed: ${String(stderr).trim()}`)) : resolve(stdout))); }
-export function runValidation(spec, worktreePath, timeoutMs) {
+export function runValidation(spec, worktreePath, timeoutMs, { signal } = {}) {
+  if (signal?.aborted) return Promise.reject(new Error("validation aborted before launch"));
   if (!spec || typeof spec.executable !== "string" || !spec.executable || !Array.isArray(spec.args) || spec.args.some((value) => typeof value !== "string")) throw new TypeError("validation executable and args are invalid.");
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) throw new TypeError("validation timeout must be a positive safe integer.");
   const cwd = fs.realpathSync(path.resolve(worktreePath, spec.cwd ?? ".")); const root = fs.realpathSync(worktreePath);
@@ -35,10 +36,13 @@ export function runValidation(spec, worktreePath, timeoutMs) {
     const child = spawn(spec.executable, spec.args, { cwd, env: buildChildEnvironment(), detached: true, stdio: ["ignore", "pipe", "pipe"], shell: false });
     const append = (current, chunk) => { const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk); const room = maximum - current.length; if (value.length > room) { outputExceeded = true; stop(); } return room > 0 ? Buffer.concat([current, value.subarray(0, room)]) : current; };
     const signalGroup = (signal) => { if (!child.pid || closed) return; try { process.kill(-child.pid, signal); } catch (error) { if (error?.code !== "ESRCH") stderr = append(stderr, `${error instanceof Error ? error.message : String(error)}\n`); } };
-    const finish = (code, signal) => { if (settled) return; settled = true; clearTimeout(timeout); clearTimeout(escalation); clearTimeout(forcedSettlement); child.stdout?.destroy(); child.stderr?.destroy(); resolve({ passed: code === 0 && !timedOut && !outputExceeded, timedOut, outputExceeded, code: code ?? signal ?? "spawn_error", stdout: stdout.toString("utf8"), stderr: stderr.toString("utf8"), timeoutMs, elapsedMs: Math.max(0, performance.now() - startedAt) }); };
+    const finish = (code, exitSignal) => { if (settled) return; settled = true; signal?.removeEventListener("abort", abort); clearTimeout(timeout); clearTimeout(escalation); clearTimeout(forcedSettlement); child.stdout?.destroy(); child.stderr?.destroy(); resolve({ passed: code === 0 && !timedOut && !outputExceeded, timedOut, outputExceeded, code: code ?? exitSignal ?? "spawn_error", stdout: stdout.toString("utf8"), stderr: stderr.toString("utf8"), timeoutMs, elapsedMs: Math.max(0, performance.now() - startedAt) }); };
     const stop = () => { if (stopping || settled) return; stopping = true; signalGroup("SIGTERM"); escalation = setTimeout(() => { signalGroup("SIGKILL"); forcedSettlement = setTimeout(() => finish(null, "termination_deadline"), graceMs); }, graceMs); };
     child.stdout.on("data", (chunk) => { stdout = append(stdout, chunk); }); child.stderr.on("data", (chunk) => { stderr = append(stderr, chunk); });
     const timeout = setTimeout(() => { timedOut = true; stop(); }, timeoutMs);
+    const abort = () => { timedOut = true; stop(); };
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
     child.once("error", (error) => { stderr = append(stderr, error.message); finish(null, "spawn_error"); });
     child.once("close", (code, signal) => { closed = true; finish(code, signal); });
   });
